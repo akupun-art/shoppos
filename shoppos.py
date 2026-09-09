@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.42"
+APP_VERSION = "1.43"
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -391,6 +391,45 @@ class Handler(BaseHTTPRequestHandler):
             self._json(public_user(row), 201)
             return
 
+        if path == "/api/password":
+            user = self.require("admin", "manager", "staff")
+            if not user:
+                return
+            old = payload.get("old") or ""
+            new = payload.get("new") or ""
+            if len(new) < 4:
+                self._json({"error": "New password must be at least 4 characters"}, 400)
+                return
+            if not check_pw(old, user["password_hash"]):
+                self._json({"error": "Current password is wrong"}, 400)
+                return
+            con = connect()
+            con.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_pw(new), user["id"]))
+            con.commit()
+            con.close()
+            self._json({"ok": True})
+            return
+
+        if path.startswith("/api/users/") and path.endswith("/password"):
+            if not self.require("admin"):
+                return
+            uid = int(path.split("/")[3])
+            new = payload.get("password") or ""
+            if len(new) < 4:
+                self._json({"error": "Password must be at least 4 characters"}, 400)
+                return
+            con = connect()
+            row = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                con.close()
+                self._json({"error": "User not found"}, 404)
+                return
+            con.execute("UPDATE users SET password_hash=? WHERE id=?", (hash_pw(new), uid))
+            con.commit()
+            con.close()
+            self._json({"ok": True})
+            return
+
         if path == "/api/config":
             if not self.require("admin"):
                 return
@@ -626,6 +665,31 @@ class Handler(BaseHTTPRequestHandler):
             con.close()
             self._json({"ok": True})
             return
+        if path.startswith("/api/users/"):
+            admin = self.require("admin")
+            if not admin:
+                return
+            uid = int(path.split("/")[3])
+            if uid == admin["id"]:
+                self._json({"error": "You cannot delete the account you are using"}, 400)
+                return
+            con = connect()
+            row = con.execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+            if not row:
+                con.close()
+                self._json({"error": "User not found"}, 404)
+                return
+            if row["role"] == "admin":
+                n = con.execute("SELECT COUNT(*) AS n FROM users WHERE role='admin'").fetchone()["n"]
+                if n <= 1:
+                    con.close()
+                    self._json({"error": "Cannot delete the last admin"}, 400)
+                    return
+            con.execute("DELETE FROM users WHERE id=?", (uid,))
+            con.commit()
+            con.close()
+            self._json({"ok": True})
+            return
         self._json({"error": "not found"}, 404)
 
 
@@ -694,6 +758,7 @@ HTML = r"""<!DOCTYPE html>
     <button data-tab="history">History</button>
     <button data-tab="settings">Settings</button>
     <button data-tab="people">People</button>
+    <button data-tab="account">Password</button>
   </nav>
   <div class="stats" id="stats">Today: —</div>
   <div class="muted" id="who" style="color:#d1d5db;font-size:13px"></div>
@@ -826,8 +891,23 @@ HTML = r"""<!DOCTYPE html>
     <div><label>Password</label><input id="uPw" type="password"/></div>
   </div>
   <button class="primary" onclick="addUser()">Create login</button>
-  <table style="margin-top:16px"><thead><tr><th>ID</th><th>Name</th><th>Role</th></tr></thead>
+  <table style="margin-top:16px"><thead><tr><th>ID</th><th>Name</th><th>Role</th><th></th></tr></thead>
   <tbody id="userBody"></tbody></table>
+  <h2 style="margin-top:22px">Change my password</h2>
+  <div class="row">
+    <div><label>Current password</label><input id="oldPw" type="password"/></div>
+    <div><label>New password</label><input id="newPw" type="password"/></div>
+  </div>
+  <button class="primary" onclick="changeMyPassword()">Save password</button>
+</section>
+
+<section id="account" class="card" hidden>
+  <h2>Change my password</h2>
+  <div class="row">
+    <div><label>Current password</label><input id="oldPw2" type="password"/></div>
+    <div><label>New password</label><input id="newPw2" type="password"/></div>
+  </div>
+  <button class="primary" onclick="changeMyPassword()">Save password</button>
 </section>
 </main>
 <div class="toast" id="toast"></div>
@@ -849,7 +929,7 @@ document.querySelectorAll("nav button").forEach(b=>{
 });
 function showTab(name){
   document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active", x.dataset.tab===name));
-  ["sell","stock","history","settings","product","people"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
+  ["sell","stock","history","settings","product","people","account"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
   if(name==="history") loadSales();
   if(name==="stock") loadProducts();
   if(name==="settings") loadMeta();
@@ -878,7 +958,8 @@ function applyRole(){
     history: true,
     settings: role==="admin",
     people: role==="admin",
-    product: role==="admin" || role==="manager"
+    product: role==="admin" || role==="manager",
+    account: true
   };
   document.querySelectorAll("nav button").forEach(b=>{
     b.style.display = allow[b.dataset.tab] ? "" : "none";
@@ -920,7 +1001,46 @@ async function doLogout(){
 }
 async function loadUsers(){
   const users = await api("/api/users");
-  $("userBody").innerHTML = users.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.name)}</td><td>${esc(u.role)}</td></tr>`).join("");
+  $("userBody").innerHTML = users.map(u=>`
+    <tr>
+      <td>${esc(u.username)}</td><td>${esc(u.name)}</td><td>${esc(u.role)}</td>
+      <td>
+        <button class="ghost" onclick="resetUserPw(${u.id})">Reset password</button>
+        <button class="ghost" onclick="deleteUser(${u.id})">Delete</button>
+      </td>
+    </tr>`).join("");
+}
+async function deleteUser(id){
+  if(!confirm("Delete this login?")) return;
+  try{
+    await api("/api/users/"+id, {method:"DELETE"});
+    toast("Deleted");
+    loadUsers();
+  }catch(err){ toast(err.message); }
+}
+async function resetUserPw(id){
+  const pw = prompt("New password for this person:");
+  if(!pw) return;
+  try{
+    await api("/api/users/"+id+"/password", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ password: pw })
+    });
+    toast("Password reset");
+  }catch(err){ toast(err.message); }
+}
+async function changeMyPassword(){
+  try{
+    await api("/api/password", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        old: ($("oldPw")&&$("oldPw").value)||($("oldPw2")&&$("oldPw2").value)||"",
+        new: ($("newPw")&&$("newPw").value)||($("newPw2")&&$("newPw2").value)||""
+      })
+    });
+    ["oldPw","newPw","oldPw2","newPw2"].forEach(id=>{ if($(id)) $(id).value=""; });
+    toast("Password changed");
+  }catch(err){ toast(err.message); }
 }
 async function addUser(){
   try{

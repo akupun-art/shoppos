@@ -5,6 +5,12 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.43 — 2026-09-10
+
+- Change your own password (Password tab, also on People for admin)
+- Admin can delete a login (not the account you are using, not the last admin)
+- Admin can reset another person's password
+
 ## 1.42 — 2026-09-10
 
 - Login with Staff ID + password
