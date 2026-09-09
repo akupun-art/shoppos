@@ -5,6 +5,10 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.49 — 2026-09-10
+
+- Language dropdown on login can be opened (scanner focus no longer closes it)
+
 ## 1.48 — 2026-09-10
 
 - Language picker: English + Bahasa Melayu first

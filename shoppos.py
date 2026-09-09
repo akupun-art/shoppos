@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.48"
+APP_VERSION = "1.49"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -1583,17 +1583,23 @@ async function doUpdate(){
   }catch(err){ toast(err.message); }
 }
 
+function loginOpen(){
+  const box=$("login");
+  return box && box.style.display!=="none";
+}
 function focusSearch(){
+  if(loginOpen()) return;
   if($("sell") && !$("sell").hidden && $("search")){
     const a=document.activeElement;
-    if(a && (a.id==="paid" || a.id==="loginId" || a.id==="loginPw")) return;
+    if(a && (a.id==="paid" || a.tagName==="SELECT" || a.tagName==="INPUT" || a.tagName==="TEXTAREA")) return;
     if(a!==$("search")) $("search").focus();
   }
 }
 setInterval(focusSearch, 700);
 document.addEventListener("click", (e)=>{
+  if(loginOpen()) return;
   if($("sell") && !$("sell").hidden && $("search")){
-    if(e.target.closest("#paid") || e.target.closest("button") || e.target.closest("#login")) return;
+    if(e.target.closest("#paid") || e.target.closest("button") || e.target.closest("select") || e.target.closest("input")) return;
     $("search").focus();
   }
 });
