@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.53"
+APP_VERSION = "1.54"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -934,11 +934,14 @@ HTML = r"""<!DOCTYPE html>
     <h2 data-i18n="cart">Cart</h2>
     <div id="cart"></div>
     <div class="total" id="total">0.00</div>
-    <div class="row">
-      <div><label>Discount RM</label><input id="discRm" type="number" min="0" step="0.01" value="0" oninput="updateChange()"/></div>
-      <div><label>Discount %</label><input id="discPct" type="number" min="0" max="100" step="0.01" value="0" oninput="updateChange()"/></div>
+    <div style="background:#fff7ed;border:1px solid #fdba74;border-radius:12px;padding:10px;margin:8px 0 12px">
+      <b>Discount</b>
+      <div class="row" style="margin:6px 0 0">
+        <div><label>RM off</label><input id="discRm" type="number" min="0" step="0.01" value="0" oninput="updateChange()"/></div>
+        <div><label>% off</label><input id="discPct" type="number" min="0" max="100" step="0.01" value="0" oninput="updateChange()"/></div>
+      </div>
+      <div class="muted" id="discLine"></div>
     </div>
-    <div class="muted" id="discLine"></div>
     <label data-i18n="cashReceived">Cash received</label>
     <input id="paid" type="number" min="0" step="0.01" placeholder="0.00"/>
     <div class="muted" id="change">Change: 0.00</div>
