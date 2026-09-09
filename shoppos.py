@@ -21,7 +21,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.43"
+APP_VERSION = "1.46"
+DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -129,6 +130,26 @@ def init_db() -> None:
     cols = [r[1] for r in con.execute("PRAGMA table_info(sales)").fetchall()]
     if "user_id" not in cols:
         con.execute("ALTER TABLE sales ADD COLUMN user_id INTEGER")
+    if "voided" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN voided INTEGER NOT NULL DEFAULT 0")
+    if "voided_by" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN voided_by INTEGER")
+    if "voided_at" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN voided_at TEXT")
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS day_closes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            day TEXT NOT NULL,
+            expected REAL NOT NULL,
+            counted REAL NOT NULL,
+            diff REAL NOT NULL,
+            note TEXT,
+            user_id INTEGER,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         con.execute(
             """INSERT INTO users (username, name, role, password_hash, created_at)
@@ -282,6 +303,11 @@ class Handler(BaseHTTPRequestHandler):
                 {
                     "version": APP_VERSION,
                     "update_url": cfg.get("update_url", ""),
+                    "shop_name": cfg.get("shop_name", "ShopPOS"),
+                    "shop_phone": cfg.get("shop_phone", ""),
+                    "shop_address": cfg.get("shop_address", ""),
+                    "paper": cfg.get("paper", "58"),
+                    "dedication": DEDICATION,
                 }
             )
             return
@@ -315,7 +341,8 @@ class Handler(BaseHTTPRequestHandler):
             con = connect()
             today = datetime.now().strftime("%Y-%m-%d")
             sold = con.execute(
-                "SELECT IFNULL(SUM(total),0) AS t, COUNT(*) AS n FROM sales WHERE created_at LIKE ?",
+                """SELECT IFNULL(SUM(total),0) AS t, COUNT(*) AS n FROM sales
+                   WHERE created_at LIKE ? AND IFNULL(voided,0)=0""",
                 (today + "%",),
             ).fetchone()
             low = rows(con.execute("SELECT * FROM products WHERE stock <= 5 ORDER BY stock, name"))
@@ -329,6 +356,32 @@ class Handler(BaseHTTPRequestHandler):
                     "low_stock": low,
                 }
             )
+            return
+        if path == "/api/day":
+            if not self.require("admin", "manager"):
+                return
+            today = datetime.now().strftime("%Y-%m-%d")
+            con = connect()
+            sold = con.execute(
+                """SELECT IFNULL(SUM(total),0) AS t, IFNULL(SUM(paid),0) AS p, COUNT(*) AS n
+                   FROM sales WHERE created_at LIKE ? AND IFNULL(voided,0)=0""",
+                (today + "%",),
+            ).fetchone()
+            closes = rows(con.execute("SELECT * FROM day_closes ORDER BY id DESC LIMIT 20"))
+            con.close()
+            self._json({"day": today, "expected": sold["t"], "paid": sold["p"], "count": sold["n"], "closes": closes})
+            return
+        if path == "/api/backup":
+            if not self.require("admin"):
+                return
+            data = DB_PATH.read_bytes() if DB_PATH.exists() else b""
+            name = "shoppos-backup-" + datetime.now().strftime("%Y%m%d-%H%M") + ".db"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{name}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
         self._json({"error": "not found"}, 404)
 
@@ -433,11 +486,19 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             if not self.require("admin"):
                 return
-            url = (payload.get("update_url") or "").strip()
             cfg = load_config()
-            cfg["update_url"] = url
+            if "update_url" in payload:
+                cfg["update_url"] = (payload.get("update_url") or "").strip()
+            if "shop_name" in payload:
+                cfg["shop_name"] = (payload.get("shop_name") or "ShopPOS").strip() or "ShopPOS"
+            if "shop_phone" in payload:
+                cfg["shop_phone"] = (payload.get("shop_phone") or "").strip()
+            if "shop_address" in payload:
+                cfg["shop_address"] = (payload.get("shop_address") or "").strip()
+            if "paper" in payload:
+                cfg["paper"] = payload.get("paper") if payload.get("paper") in ("58", "a4") else "58"
             save_config(cfg)
-            self._json({"ok": True, "update_url": url})
+            self._json({"ok": True, **{k: cfg.get(k, "") for k in ("update_url", "shop_name", "shop_phone", "shop_address", "paper")}})
             return
 
         if path == "/api/update":
@@ -603,7 +664,70 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 400)
                 return
             con.close()
+            sale["cashier"] = user.get("name") or user.get("username")
             self._json(sale, 201)
+            return
+
+        if path.startswith("/api/sales/") and path.endswith("/void"):
+            user = self.require("admin", "manager")
+            if not user:
+                return
+            sid = int(path.split("/")[3])
+            con = connect()
+            sale = con.execute("SELECT * FROM sales WHERE id=?", (sid,)).fetchone()
+            if not sale:
+                con.close()
+                self._json({"error": "Sale not found"}, 404)
+                return
+            if sale["voided"]:
+                con.close()
+                self._json({"error": "Already voided"}, 400)
+                return
+            items = rows(con.execute("SELECT * FROM sale_items WHERE sale_id=?", (sid,)))
+            for it in items:
+                if it["product_id"]:
+                    con.execute("UPDATE products SET stock = stock + ? WHERE id=?", (it["qty"], it["product_id"]))
+                    con.execute(
+                        """INSERT INTO stock_moves (product_id, qty, reason, note, created_at)
+                           VALUES (?,?,?,?,?)""",
+                        (it["product_id"], it["qty"], "void", f"void sale #{sid}", now_iso()),
+                    )
+            con.execute(
+                "UPDATE sales SET voided=1, voided_by=?, voided_at=? WHERE id=?",
+                (user["id"], now_iso(), sid),
+            )
+            con.commit()
+            con.close()
+            self._json({"ok": True})
+            return
+
+        if path == "/api/day-close":
+            user = self.require("admin", "manager")
+            if not user:
+                return
+            try:
+                counted = float(payload.get("counted") or 0)
+            except (TypeError, ValueError):
+                self._json({"error": "Counted cash must be a number"}, 400)
+                return
+            today = datetime.now().strftime("%Y-%m-%d")
+            con = connect()
+            sold = con.execute(
+                """SELECT IFNULL(SUM(total),0) AS t FROM sales
+                   WHERE created_at LIKE ? AND IFNULL(voided,0)=0""",
+                (today + "%",),
+            ).fetchone()
+            expected = float(sold["t"] or 0)
+            diff = round(counted - expected, 2)
+            con.execute(
+                """INSERT INTO day_closes (day, expected, counted, diff, note, user_id, created_at)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (today, expected, counted, diff, payload.get("note") or "", user["id"], now_iso()),
+            )
+            con.commit()
+            row = dict(con.execute("SELECT * FROM day_closes ORDER BY id DESC LIMIT 1").fetchone())
+            con.close()
+            self._json(row, 201)
             return
 
         self._json({"error": "not found"}, 404)
@@ -747,6 +871,7 @@ HTML = r"""<!DOCTYPE html>
   #login { position:fixed; inset:0; background:#111827; display:flex; align-items:center; justify-content:center; z-index:20; }
   #login .card { width:min(380px,92vw); }
   label { font-size:12px; color:var(--muted); display:block; margin:8px 0 4px; }
+  .dedication { text-align:center; color:#6b7280; font-size:12px; padding:18px 14px 8px; }
 </style>
 </head>
 <body>
@@ -793,8 +918,10 @@ HTML = r"""<!DOCTYPE html>
     <div class="muted" id="change">Change: 0.00</div>
     <div class="pay" style="margin-top:10px">
       <button class="good" onclick="checkout()">Charge</button>
+      <button class="ghost" onclick="holdCart()">Hold</button>
       <button class="ghost" onclick="clearCart()">Clear</button>
     </div>
+    <div id="holds" style="margin-top:12px"></div>
   </div>
 </section>
 
@@ -855,6 +982,16 @@ HTML = r"""<!DOCTYPE html>
 </section>
 
 <section id="history" class="card" hidden>
+  <h2>End of day</h2>
+  <p class="muted" id="dayLine">Today: —</p>
+  <div class="row">
+    <div><label>Cash counted in drawer</label><input id="counted" type="number" step="0.01" placeholder="0.00"/></div>
+  </div>
+  <div class="pay">
+    <button class="primary" onclick="closeDay()">Save day close</button>
+    <button class="ghost" onclick="printDay()">Print summary</button>
+  </div>
+  <div id="closes" class="muted" style="margin:10px 0 18px"></div>
   <h2>Recent sales</h2>
   <div id="sales"></div>
 </section>
@@ -869,6 +1006,24 @@ HTML = r"""<!DOCTYPE html>
     <button class="primary" onclick="doUpdate()">Check and update</button>
   </div>
   <p class="muted" style="margin-top:12px">After a successful update, close the black Python window and start shoppos.py again. Your shoppos.db is not replaced.</p>
+  <h2 style="margin-top:22px">Receipt</h2>
+  <label>Shop name on receipt</label>
+  <input id="shopName" placeholder="My Shop"/>
+  <label>Phone</label>
+  <input id="shopPhone" placeholder="01x-xxxxxxx"/>
+  <label>Address</label>
+  <input id="shopAddress" placeholder="Street, town"/>
+  <label>Paper</label>
+  <select id="paper" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px">
+    <option value="58">58mm thermal</option>
+    <option value="a4">A4</option>
+  </select>
+  <div class="pay" style="margin-top:10px">
+    <button class="ghost" onclick="saveReceiptPrefs()">Save receipt settings</button>
+  </div>
+  <h2 style="margin-top:22px">Backup</h2>
+  <p class="muted">Downloads shoppos.db (products, sales, users). Save the file onto a USB drive.</p>
+  <button class="primary" onclick="downloadBackup()">Download backup</button>
   <h2 style="margin-top:22px">What changed</h2>
   <pre id="changelog" class="muted" style="white-space:pre-wrap;font:13px/1.45 system-ui,sans-serif">Loading changelog…</pre>
 </section>
@@ -910,6 +1065,7 @@ HTML = r"""<!DOCTYPE html>
   <button class="primary" onclick="changeMyPassword()">Save password</button>
 </section>
 </main>
+<p class="dedication" id="dedication">Pendekar's App — Blogs can die.. idea lives on.</p>
 <div class="toast" id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -930,7 +1086,7 @@ document.querySelectorAll("nav button").forEach(b=>{
 function showTab(name){
   document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active", x.dataset.tab===name));
   ["sell","stock","history","settings","product","people","account"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
-  if(name==="history") loadSales();
+  if(name==="history"){ loadSales(); loadDay(); }
   if(name==="stock") loadProducts();
   if(name==="settings") loadMeta();
   if(name==="people") loadUsers();
@@ -1140,7 +1296,9 @@ async function checkout(){
       body: JSON.stringify({ items: cart.map(l=>({product_id:l.product_id, qty:l.qty})), paid })
     });
     toast("Sale #"+sale.id+" · change "+money(sale.change_amt));
+    printReceipt(sale);
     cart=[]; $("paid").value=""; renderCart(); loadProducts();
+    focusSearch();
   }catch(err){ toast(err.message); }
 }
 
@@ -1309,18 +1467,30 @@ async function adjust(id, qty){
 
 async function loadSales(){
   const sales = await api("/api/sales");
+  const canVoid = currentUser && (currentUser.role==="admin" || currentUser.role==="manager");
   $("sales").innerHTML = sales.map(s=>`
     <div class="item" style="cursor:default">
-      <div><b>#${s.id} · ${money(s.total)}</b>
+      <div style="flex:1"><b>#${s.id} · ${money(s.total)} ${s.voided?"· VOID":""}</b>
         <div class="muted">${esc(s.created_at)} · ${esc(s.cashier||"-")} · ${s.items.map(i=>i.qty+"× "+i.name).join(", ")}</div>
       </div>
+      ${canVoid && !s.voided ? `<button class="ghost" onclick="voidSale(${s.id})">Void</button>`:""}
+      <button class="ghost" onclick="reprint(${s.id})">Receipt</button>
     </div>`).join("") || "<p class='muted'>No sales yet.</p>";
+  window._sales = sales;
 }
 
 async function loadMeta(){
   const m = await api("/api/meta");
   $("verLine").textContent = "This PC version: " + m.version;
   $("updateUrl").value = m.update_url || "";
+  if($("shopName")) $("shopName").value = m.shop_name || "ShopPOS";
+  if($("shopPhone")) $("shopPhone").value = m.shop_phone || "";
+  if($("shopAddress")) $("shopAddress").value = m.shop_address || "";
+  if($("paper")) $("paper").value = m.paper || "58";
+  window._shopName = m.shop_name || "ShopPOS";
+  window._shopPhone = m.shop_phone || "";
+  window._shopAddress = m.shop_address || "";
+  window._paper = m.paper || "58";
   try{
     const c = await api("/api/changelog");
     $("changelog").textContent = c.text || "";
@@ -1348,6 +1518,163 @@ async function doUpdate(){
   }catch(err){ toast(err.message); }
 }
 
+function focusSearch(){
+  if($("sell") && !$("sell").hidden && $("search")){
+    const a=document.activeElement;
+    if(a && (a.id==="paid" || a.id==="loginId" || a.id==="loginPw")) return;
+    if(a!==$("search")) $("search").focus();
+  }
+}
+setInterval(focusSearch, 700);
+document.addEventListener("click", (e)=>{
+  if($("sell") && !$("sell").hidden && $("search")){
+    if(e.target.closest("#paid") || e.target.closest("button") || e.target.closest("#login")) return;
+    $("search").focus();
+  }
+});
+
+function holdCart(){
+  if(!cart.length){ toast("Cart is empty"); return; }
+  const label=prompt("Hold name (optional)", "Hold "+new Date().toLocaleTimeString());
+  if(label===null) return;
+  const holds=JSON.parse(localStorage.getItem("shoppos_holds")||"[]");
+  holds.push({id:Date.now(), label:label||"Hold", cart:cart, at:new Date().toLocaleString()});
+  localStorage.setItem("shoppos_holds", JSON.stringify(holds));
+  cart=[]; $("paid").value=""; renderCart(); renderHolds(); toast("Sale parked");
+}
+function renderHolds(){
+  const holds=JSON.parse(localStorage.getItem("shoppos_holds")||"[]");
+  if(!$("holds")) return;
+  $("holds").innerHTML = holds.length ? ("<div class='muted'>Held</div>"+holds.map(h=>`
+    <div class="cart-line">
+      <div style="flex:1"><b>${esc(h.label)}</b><div class="muted">${esc(h.at)}</div></div>
+      <button class="ghost" onclick="resumeHold(${h.id})">Resume</button>
+      <button class="ghost" onclick="dropHold(${h.id})">Del</button>
+    </div>`).join("")) : "";
+}
+function resumeHold(id){
+  const holds=JSON.parse(localStorage.getItem("shoppos_holds")||"[]");
+  const h=holds.find(x=>x.id===id);
+  if(!h) return;
+  if(cart.length && !confirm("Replace current cart with the held sale?")) return;
+  cart=h.cart||[];
+  localStorage.setItem("shoppos_holds", JSON.stringify(holds.filter(x=>x.id!==id)));
+  renderCart(); renderHolds(); toast("Resumed");
+}
+function dropHold(id){
+  const holds=JSON.parse(localStorage.getItem("shoppos_holds")||"[]").filter(x=>x.id!==id);
+  localStorage.setItem("shoppos_holds", JSON.stringify(holds));
+  renderHolds();
+}
+
+async function voidSale(id){
+  if(!confirm("Void sale #"+id+" and return stock?")) return;
+  try{
+    await api("/api/sales/"+id+"/void", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
+    toast("Voided");
+    loadSales(); loadProducts(); loadDay();
+  }catch(err){ toast(err.message); }
+}
+function reprint(id){
+  const s=(window._sales||[]).find(x=>x.id===id);
+  if(s) printReceipt(s);
+}
+function printReceipt(sale){
+  const paper=window._paper||"58";
+  const shop=window._shopName||"ShopPOS";
+  const phone=window._shopPhone||"";
+  const addr=window._shopAddress||"";
+  const w=window.open("","receipt","width=420,height=640");
+  if(!w){ toast("Allow pop-ups to print receipt"); return; }
+  const width = paper==="a4" ? "180mm" : "58mm";
+  const items=(sale.items||[]).map(i=>`<tr><td>${esc(i.name)} × ${i.qty}</td><td style="text-align:right">${money(i.line_total||i.price*i.qty)}</td></tr>`).join("");
+  w.document.write(`<!DOCTYPE html><html><head><title>Receipt ${sale.id}</title>
+    <style>
+      body{font-family:ui-monospace,Consolas,monospace;margin:8px;width:${width};font-size:${paper==="a4"?"14px":"12px"}}
+      h1{font-size:16px;margin:0 0 8px;text-align:center}
+      table{width:100%}
+      .tot{font-weight:700;border-top:1px dashed #000;margin-top:8px;padding-top:6px}
+    </style></head><body>
+    <h1>${esc(shop)}</h1>
+    ${addr?`<div style="text-align:center">${esc(addr)}</div>`:""}
+    ${phone?`<div style="text-align:center">${esc(phone)}</div>`:""}
+    <div>Sale #${sale.id}</div>
+    <div>${esc(sale.created_at||"")}</div>
+    <div>${esc(sale.cashier||"")}</div>
+    <table>${items}</table>
+    <div class="tot">Total ${money(sale.total)}<br>Paid ${money(sale.paid)}<br>Change ${money(sale.change_amt)}</div>
+    <div style="text-align:center;margin-top:10px">Thank you</div>
+    <div style="text-align:center;margin-top:8px;font-size:10px">Pendekar's App — Blogs can die.. idea lives on.</div>
+    <script>setTimeout(()=>window.print(),250);<\/script>
+    </body></html>`);
+  w.document.close();
+}
+
+async function loadDay(){
+  if(!$("dayLine")) return;
+  try{
+    const d=await api("/api/day");
+    $("dayLine").textContent = d.day+" · sales "+d.count+" · expected cash "+money(d.expected);
+    window._day=d;
+    $("closes").innerHTML = (d.closes||[]).map(c=>
+      `${esc(c.created_at)} · expected ${money(c.expected)} · counted ${money(c.counted)} · diff ${money(c.diff)}`
+    ).join("<br>") || "";
+  }catch(e){
+    $("dayLine").textContent="End of day (manager/admin)";
+  }
+}
+async function closeDay(){
+  try{
+    const row=await api("/api/day-close", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ counted: $("counted").value })
+    });
+    toast("Saved · difference "+money(row.diff));
+    loadDay();
+  }catch(err){ toast(err.message); }
+}
+function printDay(){
+  const d=window._day; if(!d){ toast("Open History first"); return; }
+  const w=window.open("","day","width=480,height=640");
+  if(!w){ toast("Allow pop-ups"); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Day ${d.day}</title></head><body style="font-family:sans-serif;padding:16px">
+    <h2>${esc(window._shopName||"ShopPOS")} — ${esc(d.day)}</h2>
+    <p>Sales: ${d.count}<br>Expected cash: ${money(d.expected)}<br>Paid in: ${money(d.paid)}</p>
+    <script>setTimeout(()=>window.print(),200);<\/script></body></html>`);
+  w.document.close();
+}
+async function saveReceiptPrefs(){
+  try{
+    await api("/api/config", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        shop_name:$("shopName").value, shop_phone:$("shopPhone").value,
+        shop_address:$("shopAddress").value, paper:$("paper").value,
+        update_url:$("updateUrl").value
+      })
+    });
+    window._shopName=$("shopName").value||"ShopPOS";
+    window._shopPhone=$("shopPhone").value||"";
+    window._shopAddress=$("shopAddress").value||"";
+    window._paper=$("paper").value||"58";
+    toast("Receipt settings saved");
+  }catch(err){ toast(err.message); }
+}
+async function downloadBackup(){
+  try{
+    const r=await fetch("/api/backup", {credentials:"same-origin"});
+    if(r.status===401){ showLogin(); return; }
+    if(!r.ok){ toast("Backup failed"); return; }
+    const blob=await r.blob();
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="shoppos-backup.db";
+    a.click();
+    toast("Backup downloaded — copy it to USB");
+  }catch(err){ toast(err.message); }
+}
+
+renderHolds();
 boot();
 </script>
 </body>

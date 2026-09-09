@@ -5,6 +5,26 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.46 — 2026-09-10
+
+- Permanent footer: Pendekar's App — Blogs can die.. idea lives on.
+- Same line on printed receipts
+- LICENSE requires that dedication to stay in copies and forks
+
+## 1.45 — 2026-09-10
+
+- Receipt header is editable: shop name, phone, address (Settings → Receipt)
+
+## 1.44 — 2026-09-10
+
+- Receipt prints after Charge (58mm thermal or A4). Shop name + paper in Settings
+- Reprint receipt from History
+- Search box stays focused on Sell for a barcode scanner
+- Hold parks a cart; Resume brings it back
+- Void sale (admin/manager) returns stock
+- End of day: expected cash vs counted, save + print summary
+- Settings: Download backup of shoppos.db (save onto USB)
+
 ## 1.43 — 2026-09-10
 
 - Change your own password (Password tab, also on People for admin)
