@@ -5,6 +5,18 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.48 — 2026-09-10
+
+- Language picker: English + Bahasa Melayu first
+- Also Indonesian, Chinese, Tamil, Hindi, Thai, Vietnamese, Filipino, Arabic, Urdu, Spanish, French, German, Portuguese, Italian, Russian, Turkish, Japanese, Korean, Bengali
+- Product names stay as typed. Dedication stays in English.
+
+## 1.47 — 2026-09-10
+
+- Update URL is built in. Shop staff do not need GitHub.
+- start-shoppos.bat — double-click to open the till
+- FOR-SHOP-OWNER.txt — plain install steps
+
 ## 1.46 — 2026-09-10
 
 - Permanent footer: Pendekar's App — Blogs can die.. idea lives on.

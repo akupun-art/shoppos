@@ -21,8 +21,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.46"
+APP_VERSION = "1.48"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
+DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -31,12 +32,15 @@ PORT = 8765
 
 
 def load_config() -> dict:
+    cfg = {}
     if CONFIG_PATH.exists():
         try:
-            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
         except Exception:
-            return {}
-    return {}
+            cfg = {}
+    if not (cfg.get("update_url") or "").strip():
+        cfg["update_url"] = DEFAULT_UPDATE_URL
+    return cfg
 
 
 def save_config(cfg: dict) -> None:
@@ -878,26 +882,29 @@ HTML = r"""<!DOCTYPE html>
 <header>
   <h1>ShopPOS</h1>
   <nav>
-    <button class="active" data-tab="sell">Sell</button>
-    <button data-tab="stock">Stock</button>
-    <button data-tab="history">History</button>
-    <button data-tab="settings">Settings</button>
-    <button data-tab="people">People</button>
-    <button data-tab="account">Password</button>
+    <button class="active" data-tab="sell" data-i18n="sell">Sell</button>
+    <button data-tab="stock" data-i18n="stock">Stock</button>
+    <button data-tab="history" data-i18n="history">History</button>
+    <button data-tab="settings" data-i18n="settings">Settings</button>
+    <button data-tab="people" data-i18n="people">People</button>
+    <button data-tab="account" data-i18n="passwordTab">Password</button>
   </nav>
   <div class="stats" id="stats">Today: —</div>
   <div class="muted" id="who" style="color:#d1d5db;font-size:13px"></div>
-  <button class="ghost" id="logoutBtn" onclick="doLogout()" style="display:none;background:#1f2937;color:#fff;border:0">Log out</button>
+  <button class="ghost" id="logoutBtn" onclick="doLogout()" style="display:none;background:#1f2937;color:#fff;border:0" data-i18n="logout">Log out</button>
+  <select id="langSelect" onchange="setLang(this.value)" title="Language" style="max-width:150px;padding:6px 8px;border-radius:8px;border:0;background:#1f2937;color:#fff"></select>
 </header>
 <div id="login">
   <div class="card">
-    <h2>ShopPOS login</h2>
-    <label>Staff ID</label>
+    <h2 data-i18n="loginTitle">ShopPOS login</h2>
+    <label data-i18n="language">Language</label>
+    <select id="loginLang" onchange="setLang(this.value)" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px"></select>
+    <label data-i18n="staffId">Staff ID</label>
     <input id="loginId" placeholder="e.g. admin or ali01"/>
-    <label>Password</label>
+    <label data-i18n="password">Password</label>
     <input id="loginPw" type="password"/>
     <div class="pay" style="margin-top:12px">
-      <button class="primary" onclick="doLogin()">Log in</button>
+      <button class="primary" onclick="doLogin()" data-i18n="login">Log in</button>
     </div>
     <p class="muted" id="loginErr"></p>
   </div>
@@ -905,21 +912,21 @@ HTML = r"""<!DOCTYPE html>
 <main>
 <section id="sell" class="grid">
   <div class="card">
-    <h2>Products</h2>
-    <input id="search" placeholder="Search name or barcode (scanner works here)" autofocus/>
+    <h2 data-i18n="products">Products</h2>
+    <input id="search" placeholder="Search name or barcode (scanner works here)" data-i18n-placeholder="searchPh" autofocus/>
     <div class="list" id="productList"></div>
   </div>
   <div class="card">
-    <h2>Cart</h2>
+    <h2 data-i18n="cart">Cart</h2>
     <div id="cart"></div>
     <div class="total" id="total">0.00</div>
-    <label>Cash received</label>
+    <label data-i18n="cashReceived">Cash received</label>
     <input id="paid" type="number" min="0" step="0.01" placeholder="0.00"/>
     <div class="muted" id="change">Change: 0.00</div>
     <div class="pay" style="margin-top:10px">
-      <button class="good" onclick="checkout()">Charge</button>
-      <button class="ghost" onclick="holdCart()">Hold</button>
-      <button class="ghost" onclick="clearCart()">Clear</button>
+      <button class="good" onclick="checkout()" data-i18n="charge">Charge</button>
+      <button class="ghost" onclick="holdCart()" data-i18n="hold">Hold</button>
+      <button class="ghost" onclick="clearCart()" data-i18n="clear">Clear</button>
     </div>
     <div id="holds" style="margin-top:12px"></div>
   </div>
@@ -1072,6 +1079,62 @@ const $ = (id) => document.getElementById(id);
 let products = [];
 let cart = [];
 let currentUser = null;
+let lang = localStorage.getItem("shoppos_lang") || "en";
+const LANG_LIST = [
+  ["en","English"],["ms","Bahasa Melayu"],["id","Bahasa Indonesia"],
+  ["zh","简体中文"],["zh-tw","繁體中文"],["ta","தமிழ்"],["hi","हिन्दी"],
+  ["th","ไทย"],["vi","Tiếng Việt"],["fil","Filipino"],
+  ["ar","العربية"],["ur","اردو"],
+  ["es","Español"],["fr","Français"],["de","Deutsch"],["pt","Português"],
+  ["it","Italiano"],["ru","Русский"],["tr","Türkçe"],
+  ["ja","日本語"],["ko","한국어"],["bn","বাংলা"]
+];
+const I18N = {
+en:{sell:"Sell",stock:"Stock",history:"History",settings:"Settings",people:"People",passwordTab:"Password",logout:"Log out",loginTitle:"ShopPOS login",language:"Language",staffId:"Staff ID",password:"Password",login:"Log in",products:"Products",searchPh:"Search name or barcode (scanner works here)",cart:"Cart",cashReceived:"Cash received",charge:"Charge",hold:"Hold",clear:"Clear",change:"Change",tapAdd:"Tap a product to add.",emptyCart:"Cart is empty",inStock:"in stock",today:"Today",sales:"sales",items:"items"},
+ms:{sell:"Jual",stock:"Stok",history:"Sejarah",settings:"Tetapan",people:"Pekerja",passwordTab:"Kata laluan",logout:"Log keluar",loginTitle:"Log masuk ShopPOS",language:"Bahasa",staffId:"ID staf",password:"Kata laluan",login:"Log masuk",products:"Produk",searchPh:"Cari nama atau kod bar (pengimbas di sini)",cart:"Troli",cashReceived:"Tunai diterima",charge:"Caj",hold:"Tahan",clear:"Kosongkan",change:"Baki",tapAdd:"Ketuk produk untuk tambah.",emptyCart:"Troli kosong",inStock:"dalam stok",today:"Hari ini",sales:"jualan",items:"item"},
+id:{sell:"Jual",stock:"Stok",history:"Riwayat",settings:"Pengaturan",people:"Staf",passwordTab:"Kata sandi",logout:"Keluar",loginTitle:"Masuk ShopPOS",language:"Bahasa",staffId:"ID staf",password:"Kata sandi",login:"Masuk",products:"Produk",searchPh:"Cari nama atau barcode",cart:"Keranjang",cashReceived:"Tunai diterima",charge:"Bayar",hold:"Tahan",clear:"Hapus",change:"Kembalian",tapAdd:"Ketuk produk untuk menambah.",emptyCart:"Keranjang kosong",inStock:"stok",today:"Hari ini",sales:"penjualan",items:"item"},
+zh:{sell:"收银",stock:"库存",history:"记录",settings:"设置",people:"员工",passwordTab:"密码",logout:"退出",loginTitle:"ShopPOS 登录",language:"语言",staffId:"工号",password:"密码",login:"登录",products:"商品",searchPh:"搜索名称或条码",cart:"购物车",cashReceived:"收款",charge:"结账",hold:"挂单",clear:"清空",change:"找零",tapAdd:"点击商品加入。",emptyCart:"购物车为空",inStock:"库存",today:"今天",sales:"笔",items:"件"},
+"zh-tw":{sell:"收銀",stock:"庫存",history:"紀錄",settings:"設定",people:"員工",passwordTab:"密碼",logout:"登出",loginTitle:"ShopPOS 登入",language:"語言",staffId:"員工編號",password:"密碼",login:"登入",products:"商品",searchPh:"搜尋名稱或條碼",cart:"購物車",cashReceived:"收款",charge:"結帳",hold:"掛單",clear:"清除",change:"找零",tapAdd:"點選商品加入。",emptyCart:"購物車是空的",inStock:"庫存",today:"今天",sales:"筆",items:"件"},
+ta:{sell:"விற்பனை",stock:"சரக்கு",history:"வரலாறு",settings:"அமைப்புகள்",people:"பணியாளர்",passwordTab:"கடவுச்சொல்",logout:"வெளியேறு",loginTitle:"ShopPOS நுழைவு",language:"மொழி",staffId:"ஊழியர் ID",password:"கடவுச்சொல்",login:"நுழை",products:"பொருட்கள்",searchPh:"பெயர் அல்லது பார்கோடு",cart:"கூடை",cashReceived:"ரொக்கம்",charge:"பணம் வாங்கு",hold:"வைத்திரு",clear:"அழி",change:"மீதி",tapAdd:"பொருளைத் தட்டவும்.",emptyCart:"கூடை காலி",inStock:"சரக்கு",today:"இன்று",sales:"விற்பனை",items:"பொருள்"},
+hi:{sell:"बिक्री",stock:"स्टॉक",history:"इतिहास",settings:"सेटिंग",people:"स्टाफ",passwordTab:"पासवर्ड",logout:"लॉग आउट",loginTitle:"ShopPOS लॉगिन",language:"भाषा",staffId:"स्टाफ आईडी",password:"पासवर्ड",login:"लॉग इन",products:"सामान",searchPh:"नाम या बारकोड खोजें",cart:"कार्ट",cashReceived:"नकद",charge:"चार्ज",hold:"होल्ड",clear:"साफ़",change:"वापसी",tapAdd:"जोड़ने के लिए टैप करें।",emptyCart:"कार्ट खाली",inStock:"स्टॉक",today:"आज",sales:"बिक्री",items:"आइटम"},
+th:{sell:"ขาย",stock:"สต็อก",history:"ประวัติ",settings:"ตั้งค่า",people:"พนักงาน",passwordTab:"รหัสผ่าน",logout:"ออก",loginTitle:"เข้าสู่ระบบ ShopPOS",language:"ภาษา",staffId:"รหัสพนักงาน",password:"รหัสผ่าน",login:"เข้าสู่ระบบ",products:"สินค้า",searchPh:"ค้นหาชื่อหรือบาร์โค้ด",cart:"ตะกร้า",cashReceived:"เงินสด",charge:"คิดเงิน",hold:"พักบิล",clear:"ล้าง",change:"เงินทอน",tapAdd:"แตะสินค้าเพื่อเพิ่ม",emptyCart:"ตะกร้าว่าง",inStock:"คงเหลือ",today:"วันนี้",sales:"บิล",items:"รายการ"},
+vi:{sell:"Bán",stock:"Kho",history:"Lịch sử",settings:"Cài đặt",people:"Nhân viên",passwordTab:"Mật khẩu",logout:"Đăng xuất",loginTitle:"Đăng nhập ShopPOS",language:"Ngôn ngữ",staffId:"Mã NV",password:"Mật khẩu",login:"Đăng nhập",products:"Sản phẩm",searchPh:"Tìm tên hoặc mã vạch",cart:"Giỏ",cashReceived:"Tiền mặt",charge:"Thu tiền",hold:"Giữ đơn",clear:"Xóa",change:"Tiền thối",tapAdd:"Chạm để thêm.",emptyCart:"Giỏ trống",inStock:"tồn",today:"Hôm nay",sales:"đơn",items:"món"},
+fil:{sell:"Benta",stock:"Stock",history:"Kasaysayan",settings:"Settings",people:"Staff",passwordTab:"Password",logout:"Log out",loginTitle:"Login sa ShopPOS",language:"Wika",staffId:"Staff ID",password:"Password",login:"Log in",products:"Produkto",searchPh:"Hanapin ang pangalan o barcode",cart:"Cart",cashReceived:"Cash",charge:"Charge",hold:"Hold",clear:"Clear",change:"Sukli",tapAdd:"I-tap para idagdag.",emptyCart:"Walang laman ang cart",inStock:"stock",today:"Ngayon",sales:"benta",items:"item"},
+ar:{sell:"بيع",stock:"مخزون",history:"سجل",settings:"إعدادات",people:"موظفون",passwordTab:"كلمة السر",logout:"خروج",loginTitle:"دخول ShopPOS",language:"اللغة",staffId:"رقم الموظف",password:"كلمة السر",login:"دخول",products:"منتجات",searchPh:"ابحث بالاسم أو الباركود",cart:"سلة",cashReceived:"نقداً",charge:"تحصيل",hold:"تعليق",clear:"مسح",change:"الباقي",tapAdd:"اضغط للإضافة.",emptyCart:"السلة فارغة",inStock:"متوفر",today:"اليوم",sales:"مبيعات",items:"أصناف"},
+ur:{sell:"فروخت",stock:"اسٹاک",history:"ریکارڈ",settings:"ترتیبات",people:"عملہ",passwordTab:"پاس ورڈ",logout:"لاگ آؤٹ",loginTitle:"ShopPOS لاگ ان",language:"زبان",staffId:"اسٹاف آئی ڈی",password:"پاس ورڈ",login:"لاگ ان",products:"سامان",searchPh:"نام یا بارکوڈ",cart:"کارٹ",cashReceived:"نقد",charge:"چارج",hold:"ہولڈ",clear:"خالی",change:"بقیہ",tapAdd:"شامل کرنے کے لیے ٹیپ کریں۔",emptyCart:"کارٹ خالی",inStock:"اسٹاک",today:"آج",sales:"سیلز",items:"آئٹم"},
+es:{sell:"Vender",stock:"Stock",history:"Historial",settings:"Ajustes",people:"Personal",passwordTab:"Contraseña",logout:"Salir",loginTitle:"Entrar a ShopPOS",language:"Idioma",staffId:"ID de personal",password:"Contraseña",login:"Entrar",products:"Productos",searchPh:"Buscar nombre o código",cart:"Carrito",cashReceived:"Efectivo",charge:"Cobrar",hold:"Pausar",clear:"Vaciar",change:"Cambio",tapAdd:"Toca para añadir.",emptyCart:"Carrito vacío",inStock:"en stock",today:"Hoy",sales:"ventas",items:"artículos"},
+fr:{sell:"Vente",stock:"Stock",history:"Historique",settings:"Réglages",people:"Équipe",passwordTab:"Mot de passe",logout:"Déconnexion",loginTitle:"Connexion ShopPOS",language:"Langue",staffId:"ID employé",password:"Mot de passe",login:"Connexion",products:"Produits",searchPh:"Nom ou code-barres",cart:"Panier",cashReceived:"Espèces",charge:"Encaisser",hold:"Mettre en attente",clear:"Vider",change:"Monnaie",tapAdd:"Touchez pour ajouter.",emptyCart:"Panier vide",inStock:"en stock",today:"Aujourd'hui",sales:"ventes",items:"articles"},
+de:{sell:"Kasse",stock:"Lager",history:"Verlauf",settings:"Einstellungen",people:"Personal",passwordTab:"Passwort",logout:"Abmelden",loginTitle:"ShopPOS Anmeldung",language:"Sprache",staffId:"Mitarbeiter-ID",password:"Passwort",login:"Anmelden",products:"Artikel",searchPh:"Name oder Barcode",cart:"Warenkorb",cashReceived:"Bar",charge:"Kasse",hold:"Halten",clear:"Leeren",change:"Rückgeld",tapAdd:"Tippen zum Hinzufügen.",emptyCart:"Warenkorb leer",inStock:"auf Lager",today:"Heute",sales:"Verkäufe",items:"Artikel"},
+pt:{sell:"Venda",stock:"Estoque",history:"Histórico",settings:"Definições",people:"Pessoal",passwordTab:"Palavra-passe",logout:"Sair",loginTitle:"Entrar no ShopPOS",language:"Idioma",staffId:"ID do funcionário",password:"Palavra-passe",login:"Entrar",products:"Produtos",searchPh:"Nome ou código de barras",cart:"Carrinho",cashReceived:"Dinheiro",charge:"Cobrar",hold:"Espera",clear:"Limpar",change:"Troco",tapAdd:"Toque para adicionar.",emptyCart:"Carrinho vazio",inStock:"em stock",today:"Hoje",sales:"vendas",items:"itens"},
+it:{sell:"Vendita",stock:"Magazzino",history:"Cronologia",settings:"Impostazioni",people:"Personale",passwordTab:"Password",logout:"Esci",loginTitle:"Accesso ShopPOS",language:"Lingua",staffId:"ID dipendente",password:"Password",login:"Accedi",products:"Prodotti",searchPh:"Nome o codice a barre",cart:"Carrello",cashReceived:"Contanti",charge:"Incassa",hold:"Sospendi",clear:"Svuota",change:"Resto",tapAdd:"Tocca per aggiungere.",emptyCart:"Carrello vuoto",inStock:"disponibili",today:"Oggi",sales:"vendite",items:"articoli"},
+ru:{sell:"Продажа",stock:"Склад",history:"История",settings:"Настройки",people:"Сотрудники",passwordTab:"Пароль",logout:"Выход",loginTitle:"Вход в ShopPOS",language:"Язык",staffId:"ID сотрудника",password:"Пароль",login:"Войти",products:"Товары",searchPh:"Имя или штрихкод",cart:"Корзина",cashReceived:"Наличные",charge:"Оплата",hold:"Отложить",clear:"Очистить",change:"Сдача",tapAdd:"Нажмите, чтобы добавить.",emptyCart:"Корзина пуста",inStock:"на складе",today:"Сегодня",sales:"продажи",items:"позиции"},
+tr:{sell:"Satış",stock:"Stok",history:"Geçmiş",settings:"Ayarlar",people:"Personel",passwordTab:"Şifre",logout:"Çıkış",loginTitle:"ShopPOS giriş",language:"Dil",staffId:"Personel no",password:"Şifre",login:"Giriş",products:"Ürünler",searchPh:"Ad veya barkod ara",cart:"Sepet",cashReceived:"Nakit",charge:"Tahsil et",hold:"Beklet",clear:"Temizle",change:"Para üstü",tapAdd:"Eklemek için dokunun.",emptyCart:"Sepet boş",inStock:"stokta",today:"Bugün",sales:"satış",items:"ürün"},
+ja:{sell:"販売",stock:"在庫",history:"履歴",settings:"設定",people:"スタッフ",passwordTab:"パスワード",logout:"ログアウト",loginTitle:"ShopPOS ログイン",language:"言語",staffId:"スタッフID",password:"パスワード",login:"ログイン",products:"商品",searchPh:"名前またはバーコード",cart:"カート",cashReceived:"預かり金",charge:"会計",hold:"保留",clear:"クリア",change:"お釣り",tapAdd:"タップして追加",emptyCart:"カートは空です",inStock:"在庫",today:"今日",sales:"件",items:"点"},
+ko:{sell:"판매",stock:"재고",history:"기록",settings:"설정",people:"직원",passwordTab:"비밀번호",logout:"로그아웃",loginTitle:"ShopPOS 로그인",language:"언어",staffId:"직원 ID",password:"비밀번호",login:"로그인",products:"상품",searchPh:"이름 또는 바코드",cart:"장바구니",cashReceived:"받은 현금",charge:"결제",hold:"보류",clear:"비우기",change:"거스름돈",tapAdd:"눌러서 추가",emptyCart:"장바구니가 비었습니다",inStock:"재고",today:"오늘",sales:"건",items:"개"},
+bn:{sell:"বিক্রি",stock:"স্টক",history:"ইতিহাস",settings:"সেটিংস",people:"স্টাফ",passwordTab:"পাসওয়ার্ড",logout:"লগ আউট",loginTitle:"ShopPOS লগইন",language:"ভাষা",staffId:"স্টাফ আইডি",password:"পাসওয়ার্ড",login:"লগইন",products:"পণ্য",searchPh:"নাম বা বারকোড",cart:"কার্ট",cashReceived:"নগদ",charge:"চার্জ",hold:"হোল্ড",clear:"মুছুন",change:"ফেরত",tapAdd:"যোগ করতে ট্যাপ করুন।",emptyCart:"কার্ট খালি",inStock:"স্টক",today:"আজ",sales:"বিক্রি",items:"আইটেম"}
+};
+function t(k){ const pack=I18N[lang]||I18N.en; return pack[k]||I18N.en[k]||k; }
+function fillLangSelects(){
+  ["langSelect","loginLang"].forEach(id=>{
+    const el=$(id); if(!el) return;
+    el.innerHTML=LANG_LIST.map(([c,n])=>`<option value="${c}">${n}</option>`).join("");
+    el.value=lang;
+  });
+}
+function applyI18n(){
+  document.documentElement.lang = lang;
+  document.documentElement.dir = (lang==="ar"||lang==="ur") ? "rtl" : "ltr";
+  document.querySelectorAll("[data-i18n]").forEach(el=>{ el.textContent=t(el.getAttribute("data-i18n")); });
+  document.querySelectorAll("[data-i18n-placeholder]").forEach(el=>{ el.placeholder=t(el.getAttribute("data-i18n-placeholder")); });
+  fillLangSelects();
+  if(typeof renderCart==="function") renderCart();
+  if(typeof loadSummary==="function" && currentUser) loadSummary();
+}
+function setLang(code){
+  lang=code||"en";
+  localStorage.setItem("shoppos_lang", lang);
+  applyI18n();
+}
 
 function toast(msg){
   const t = $("toast"); t.textContent = msg; t.style.display="block";
@@ -1124,6 +1187,8 @@ function applyRole(){
   $("logoutBtn").style.display = currentUser ? "" : "none";
 }
 async function boot(){
+  fillLangSelects();
+  applyI18n();
   try{
     const me = await fetch("/api/me", {credentials:"same-origin"}).then(r=>r.json());
     if(me.user){
@@ -1215,7 +1280,7 @@ async function addUser(){
 
 async function loadSummary(){
   const s = await api("/api/summary");
-  $("stats").textContent = `Today: ${money(s.today_total)}  ·  ${s.today_count} sales  ·  ${s.product_count} items`;
+  $("stats").textContent = `${t("today")}: ${money(s.today_total)}  ·  ${s.today_count} ${t("sales")}  ·  ${s.product_count} ${t("items")}`;
   $("low").textContent = s.low_stock.length ? ("Low stock: " + s.low_stock.map(p=>p.name+" ("+p.stock+")").join(", ")) : "No low-stock alerts.";
 }
 
@@ -1224,7 +1289,7 @@ async function loadProducts(){
   products = await api("/api/products" + (q?("?q="+encodeURIComponent(q)):""));
   $("productList").innerHTML = products.map(p=>`
     <div class="item" onclick="addToCart(${p.id})">
-      <div><b>${esc(p.name)}</b><div class="muted">${esc(p.barcode||"")} · <span class="stock ${stockClass(p.stock)}">${p.stock} in stock</span></div></div>
+      <div><b>${esc(p.name)}</b><div class="muted">${esc(p.barcode||"")} · <span class="stock ${stockClass(p.stock)}">${p.stock} ${t("inStock")}</span></div></div>
       <div class="price">${money(p.price)}</div>
     </div>`).join("") || "<p class='muted'>No products yet. Add some in Stock.</p>";
   $("stockBody").innerHTML = products.map(p=>`
@@ -1263,7 +1328,7 @@ function renderCart(){
       <div class="qty">${l.qty}</div>
       <button class="ghost" onclick="chg(${i},1)">+</button>
       <div class="price">${money(l.price*l.qty)}</div>
-    </div>`).join("") || "<p class='muted'>Tap a product to add.</p>";
+    </div>`).join("") || `<p class='muted'>${t("tapAdd")}</p>`;
   const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
   $("total").textContent = money(t);
   updateChange();
@@ -1277,7 +1342,7 @@ function clearCart(){ cart=[]; renderCart(); }
 function updateChange(){
   const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
   const paid = Number($("paid").value||0);
-  $("change").textContent = "Change: " + money(Math.max(0, paid-t));
+  $("change").textContent = t("change") + ": " + money(Math.max(0, paid-t));
 }
 $("paid").addEventListener("input", updateChange);
 $("search").addEventListener("input", ()=>loadProducts());
@@ -1288,7 +1353,7 @@ $("search").addEventListener("keydown", (e)=>{
 async function checkout(){
   const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
   let paid = Number($("paid").value||0);
-  if(!cart.length){ toast("Cart is empty"); return; }
+  if(!cart.length){ toast(t("emptyCart")); return; }
   if(!paid) paid = t;
   try{
     const sale = await api("/api/checkout", {
@@ -1534,7 +1599,7 @@ document.addEventListener("click", (e)=>{
 });
 
 function holdCart(){
-  if(!cart.length){ toast("Cart is empty"); return; }
+  if(!cart.length){ toast(t("emptyCart")); return; }
   const label=prompt("Hold name (optional)", "Hold "+new Date().toLocaleTimeString());
   if(label===null) return;
   const holds=JSON.parse(localStorage.getItem("shoppos_holds")||"[]");
