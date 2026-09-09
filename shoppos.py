@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.4"
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -173,6 +173,28 @@ class Handler(BaseHTTPRequestHandler):
                     "update_url": cfg.get("update_url", ""),
                 }
             )
+            return
+        if path == "/api/changelog":
+            cfg = load_config()
+            url = (cfg.get("update_url") or "").strip()
+            text = ""
+            local = ROOT / "CHANGELOG.md"
+            if url:
+                if "github.com" in url and "/blob/" in url:
+                    url = url.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/")
+                log_url = url.replace("shoppos.py", "CHANGELOG.md")
+                if log_url != url:
+                    try:
+                        req = urllib.request.Request(log_url, headers={"User-Agent": "ShopPOS"})
+                        with urllib.request.urlopen(req, timeout=20) as resp:
+                            text = resp.read().decode("utf-8", errors="replace")
+                    except Exception:
+                        text = ""
+            if not text and local.exists():
+                text = local.read_text(encoding="utf-8")
+            if not text:
+                text = "No changelog yet. Upload CHANGELOG.md to the GitHub repo next to shoppos.py."
+            self._json({"text": text})
             return
         if path == "/api/summary":
             con = connect()
@@ -370,11 +392,54 @@ class Handler(BaseHTTPRequestHandler):
 
         self._json({"error": "not found"}, 404)
 
+    def do_PUT(self):
+        path = urlparse(self.path).path
+        try:
+            payload = self._read_json()
+        except json.JSONDecodeError:
+            self._json({"error": "invalid json"}, 400)
+            return
+        if path.startswith("/api/products/"):
+            pid = int(path.split("/")[3])
+            name = (payload.get("name") or "").strip()
+            if not name:
+                self._json({"error": "Name is required"}, 400)
+                return
+            barcode = (payload.get("barcode") or "").strip() or None
+            try:
+                price = float(payload.get("price") or 0)
+                cost = float(payload.get("cost") or 0)
+            except (TypeError, ValueError):
+                self._json({"error": "Price / cost must be numbers"}, 400)
+                return
+            con = connect()
+            p = con.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone()
+            if not p:
+                con.close()
+                self._json({"error": "Product not found"}, 404)
+                return
+            try:
+                con.execute(
+                    "UPDATE products SET name=?, barcode=?, price=?, cost=? WHERE id=?",
+                    (name, barcode, price, cost, pid),
+                )
+                con.commit()
+            except sqlite3.IntegrityError:
+                con.close()
+                self._json({"error": "Barcode already used"}, 400)
+                return
+            row = dict(con.execute("SELECT * FROM products WHERE id=?", (pid,)).fetchone())
+            con.close()
+            self._json(row)
+            return
+        self._json({"error": "not found"}, 404)
+
     def do_DELETE(self):
         path = urlparse(self.path).path
         if path.startswith("/api/products/"):
             pid = int(path.split("/")[3])
             con = connect()
+            con.execute("UPDATE sale_items SET product_id=NULL WHERE product_id=?", (pid,))
             con.execute("DELETE FROM products WHERE id=?", (pid,))
             con.commit()
             con.close()
@@ -467,7 +532,8 @@ HTML = r"""<!DOCTYPE html>
 </section>
 
 <section id="stock" class="card" hidden>
-  <h2>Add product</h2>
+  <h2 id="formTitle">Add product</h2>
+  <input type="hidden" id="pId" value=""/>
   <div class="row">
     <div style="flex:2"><label>Name</label><input id="pName" placeholder="e.g. Water 600ml"/></div>
     <div style="flex:1"><label>Barcode</label><input id="pCode" placeholder="optional"/></div>
@@ -475,9 +541,12 @@ HTML = r"""<!DOCTYPE html>
   <div class="row">
     <div><label>Sell price</label><input id="pPrice" type="number" step="0.01" value="0"/></div>
     <div><label>Cost</label><input id="pCost" type="number" step="0.01" value="0"/></div>
-    <div><label>Opening stock</label><input id="pStock" type="number" step="1" value="0"/></div>
+    <div id="openStockWrap"><label>Opening stock</label><input id="pStock" type="number" step="1" value="0"/></div>
   </div>
-  <button class="primary" onclick="addProduct()">Save product</button>
+  <div class="pay">
+    <button class="primary" id="saveBtn" onclick="saveProduct()">Save product</button>
+    <button class="ghost" id="cancelEdit" onclick="resetForm()" hidden>Cancel edit</button>
+  </div>
   <h2 style="margin-top:22px">Inventory</h2>
   <div id="low" class="muted"></div>
   <table><thead><tr><th>Name</th><th>Barcode</th><th>Price</th><th>Stock</th><th></th></tr></thead>
@@ -499,6 +568,8 @@ HTML = r"""<!DOCTYPE html>
     <button class="primary" onclick="doUpdate()">Check and update</button>
   </div>
   <p class="muted" style="margin-top:12px">After a successful update, close the black Python window and start shoppos.py again. Your shoppos.db is not replaced.</p>
+  <h2 style="margin-top:22px">What changed</h2>
+  <pre id="changelog" class="muted" style="white-space:pre-wrap;font:13px/1.45 system-ui,sans-serif">Loading changelog…</pre>
 </section>
 </main>
 <div class="toast" id="toast"></div>
@@ -555,6 +626,8 @@ async function loadProducts(){
         <button class="ghost" onclick="adjust(${p.id},1)">+1</button>
         <button class="ghost" onclick="adjust(${p.id},-1)">-1</button>
         <button class="ghost" onclick="promptQty(${p.id})">+/- qty</button>
+        <button class="ghost" onclick="editProduct(${p.id})">Edit</button>
+        <button class="ghost" onclick="deleteProduct(${p.id})">Del</button>
       </td>
     </tr>`).join("");
   loadSummary();
@@ -617,17 +690,62 @@ async function checkout(){
   }catch(err){ toast(err.message); }
 }
 
-async function addProduct(){
+function resetForm(){
+  $("pId").value="";
+  $("pName").value=$("pCode").value="";
+  $("pPrice").value=$("pCost").value=$("pStock").value="0";
+  $("formTitle").textContent="Add product";
+  $("saveBtn").textContent="Save product";
+  $("openStockWrap").hidden=false;
+  $("cancelEdit").hidden=true;
+}
+function editProduct(id){
+  const p = products.find(x=>x.id===id);
+  if(!p) return;
+  $("pId").value=id;
+  $("pName").value=p.name;
+  $("pCode").value=p.barcode||"";
+  $("pPrice").value=p.price;
+  $("pCost").value=p.cost;
+  $("formTitle").textContent="Edit product";
+  $("saveBtn").textContent="Save changes";
+  $("openStockWrap").hidden=true;
+  $("cancelEdit").hidden=false;
+  $("pName").focus();
+}
+async function deleteProduct(id){
+  const p = products.find(x=>x.id===id);
+  if(!p) return;
+  if(!confirm("Delete \""+p.name+"\"? Past sales keep the name. Stock of this item is removed.")) return;
   try{
-    await api("/api/products", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        name: $("pName").value, barcode: $("pCode").value,
-        price: $("pPrice").value, cost: $("pCost").value, stock: $("pStock").value
-      })
-    });
-    $("pName").value=$("pCode").value=""; $("pPrice").value=$("pCost").value=$("pStock").value="0";
-    toast("Product saved"); loadProducts();
+    await api("/api/products/"+id, { method:"DELETE" });
+    if($("pId").value==String(id)) resetForm();
+    toast("Deleted");
+    loadProducts();
+  }catch(err){ toast(err.message); }
+}
+async function saveProduct(){
+  const id = $("pId").value;
+  const body = {
+    name: $("pName").value, barcode: $("pCode").value,
+    price: $("pPrice").value, cost: $("pCost").value, stock: $("pStock").value
+  };
+  try{
+    if(id){
+      await api("/api/products/"+id, {
+        method:"PUT", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(body)
+      });
+      toast("Updated");
+    }else{
+      await api("/api/products", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify(body)
+      });
+      toast("Product saved");
+    }
+    resetForm();
+    loadProducts();
   }catch(err){ toast(err.message); }
 }
 
@@ -662,6 +780,12 @@ async function loadMeta(){
   const m = await api("/api/meta");
   $("verLine").textContent = "This PC version: " + m.version;
   $("updateUrl").value = m.update_url || "";
+  try{
+    const c = await api("/api/changelog");
+    $("changelog").textContent = c.text || "";
+  }catch(err){
+    $("changelog").textContent = "Could not load changelog.";
+  }
 }
 async function saveUpdateUrl(){
   try{
