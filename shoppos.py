@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.49"
+APP_VERSION = "1.5"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -892,13 +892,10 @@ HTML = r"""<!DOCTYPE html>
   <div class="stats" id="stats">Today: —</div>
   <div class="muted" id="who" style="color:#d1d5db;font-size:13px"></div>
   <button class="ghost" id="logoutBtn" onclick="doLogout()" style="display:none;background:#1f2937;color:#fff;border:0" data-i18n="logout">Log out</button>
-  <select id="langSelect" onchange="setLang(this.value)" title="Language" style="max-width:150px;padding:6px 8px;border-radius:8px;border:0;background:#1f2937;color:#fff"></select>
 </header>
 <div id="login">
   <div class="card">
     <h2 data-i18n="loginTitle">ShopPOS login</h2>
-    <label data-i18n="language">Language</label>
-    <select id="loginLang" onchange="setLang(this.value)" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px"></select>
     <label data-i18n="staffId">Staff ID</label>
     <input id="loginId" placeholder="e.g. admin or ali01"/>
     <label data-i18n="password">Password</label>
@@ -1004,6 +1001,8 @@ HTML = r"""<!DOCTYPE html>
 </section>
 
 <section id="settings" class="card" hidden>
+  <h2 data-i18n="language">Language</h2>
+  <select id="settingsLang" onchange="setLang(this.value)" style="width:100%;max-width:320px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;margin-bottom:18px"></select>
   <h2>Updates</h2>
   <p class="muted" id="verLine">Version —</p>
   <label>GitHub raw URL for shoppos.py</label>
@@ -1115,7 +1114,7 @@ bn:{sell:"বিক্রি",stock:"স্টক",history:"ইতিহাস",
 };
 function t(k){ const pack=I18N[lang]||I18N.en; return pack[k]||I18N.en[k]||k; }
 function fillLangSelects(){
-  ["langSelect","loginLang"].forEach(id=>{
+  ["settingsLang"].forEach(id=>{
     const el=$(id); if(!el) return;
     el.innerHTML=LANG_LIST.map(([c,n])=>`<option value="${c}">${n}</option>`).join("");
     el.value=lang;
@@ -1151,8 +1150,9 @@ function showTab(name){
   ["sell","stock","history","settings","product","people","account"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
   if(name==="history"){ loadSales(); loadDay(); }
   if(name==="stock") loadProducts();
-  if(name==="settings") loadMeta();
+  if(name==="settings"){ loadMeta(); fillLangSelects(); }
   if(name==="people") loadUsers();
+  if(name==="sell") focusSearch();
 }
 
 async function api(path, opt){
@@ -1175,7 +1175,7 @@ function applyRole(){
     sell: true,
     stock: role==="admin" || role==="manager",
     history: true,
-    settings: role==="admin",
+    settings: true,
     people: role==="admin",
     product: role==="admin" || role==="manager",
     account: true
@@ -1583,26 +1583,9 @@ async function doUpdate(){
   }catch(err){ toast(err.message); }
 }
 
-function loginOpen(){
-  const box=$("login");
-  return box && box.style.display!=="none";
-}
 function focusSearch(){
-  if(loginOpen()) return;
-  if($("sell") && !$("sell").hidden && $("search")){
-    const a=document.activeElement;
-    if(a && (a.id==="paid" || a.tagName==="SELECT" || a.tagName==="INPUT" || a.tagName==="TEXTAREA")) return;
-    if(a!==$("search")) $("search").focus();
-  }
+  if($("search") && $("sell") && !$("sell").hidden) $("search").focus();
 }
-setInterval(focusSearch, 700);
-document.addEventListener("click", (e)=>{
-  if(loginOpen()) return;
-  if($("sell") && !$("sell").hidden && $("search")){
-    if(e.target.closest("#paid") || e.target.closest("button") || e.target.closest("select") || e.target.closest("input")) return;
-    $("search").focus();
-  }
-});
 
 function holdCart(){
   if(!cart.length){ toast(t("emptyCart")); return; }

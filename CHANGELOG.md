@@ -5,6 +5,11 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.5 — 2026-09-10
+
+- Language picker only in Settings (removed from login and header)
+- Removed 0.7s auto-focus timer that closed dropdowns
+
 ## 1.49 — 2026-09-10
 
 - Language dropdown on login can be opened (scanner focus no longer closes it)
