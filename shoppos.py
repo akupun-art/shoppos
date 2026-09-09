@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.41"
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -495,6 +495,9 @@ HTML = r"""<!DOCTYPE html>
   .pay button.good { background:var(--good); }
   table { width:100%; border-collapse:collapse; }
   th, td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); font-size:14px; }
+  tr.clickable { cursor:pointer; }
+  tr.clickable:hover { background:#f3f4f6; }
+  .label-box { border:1px dashed var(--line); border-radius:12px; padding:16px; text-align:center; background:#fff; }
   .toast { position:fixed; bottom:16px; right:16px; background:#111827; color:#fff; padding:10px 14px; border-radius:10px; display:none; }
   label { font-size:12px; color:var(--muted); display:block; margin:8px 0 4px; }
 </style>
@@ -553,6 +556,40 @@ HTML = r"""<!DOCTYPE html>
   <tbody id="stockBody"></tbody></table>
 </section>
 
+<section id="product" class="card" hidden>
+  <div class="pay" style="margin-bottom:12px">
+    <button class="ghost" onclick="showTab('stock')">← Back to stock</button>
+  </div>
+  <h2 id="prodTitle">Product</h2>
+  <input type="hidden" id="dId" value=""/>
+  <div class="row">
+    <div style="flex:2"><label>Name</label><input id="dName"/></div>
+    <div style="flex:1"><label>Barcode number</label><input id="dCode" placeholder="scan or type"/></div>
+  </div>
+  <div class="row">
+    <div><label>Sell price</label><input id="dPrice" type="number" step="0.01"/></div>
+    <div><label>Cost</label><input id="dCost" type="number" step="0.01"/></div>
+    <div><label>Stock</label><input id="dStock" type="number" step="1"/></div>
+  </div>
+  <div class="pay">
+    <button class="primary" onclick="saveDetail()">Save changes</button>
+    <button class="ghost" onclick="adjustFromDetail(1)">Stock +1</button>
+    <button class="ghost" onclick="adjustFromDetail(-1)">Stock −1</button>
+    <button class="ghost" onclick="deleteFromDetail()">Delete</button>
+  </div>
+  <h2 style="margin-top:22px">Label</h2>
+  <p class="muted">This draws the bars from the barcode number. Print and stick on the product. Scanner reads the bars.</p>
+  <div class="label-box" id="labelPreview">
+    <div id="labelName" style="font-weight:700;margin-bottom:8px"></div>
+    <svg id="labelBars" width="280" height="80"></svg>
+    <div id="labelCode" class="muted"></div>
+    <div id="labelPrice" style="font-weight:700;margin-top:6px"></div>
+  </div>
+  <div class="pay" style="margin-top:10px">
+    <button class="primary" onclick="printLabel()">Print label</button>
+  </div>
+</section>
+
 <section id="history" class="card" hidden>
   <h2>Recent sales</h2>
   <div id="sales"></div>
@@ -586,15 +623,15 @@ function money(n){ return Number(n).toFixed(2); }
 function stockClass(s){ return s<=0?"out":s<=5?"low":"ok"; }
 
 document.querySelectorAll("nav button").forEach(b=>{
-  b.onclick = ()=>{
-    document.querySelectorAll("nav button").forEach(x=>x.classList.remove("active"));
-    b.classList.add("active");
-    ["sell","stock","history","settings"].forEach(id=>$(id).hidden = id!==b.dataset.tab);
-    if(b.dataset.tab==="history") loadSales();
-    if(b.dataset.tab==="stock") loadProducts();
-    if(b.dataset.tab==="settings") loadMeta();
-  };
+  b.onclick = ()=> showTab(b.dataset.tab);
 });
+function showTab(name){
+  document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active", x.dataset.tab===name));
+  ["sell","stock","history","settings","product"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
+  if(name==="history") loadSales();
+  if(name==="stock") loadProducts();
+  if(name==="settings") loadMeta();
+}
 
 async function api(path, opt){
   const r = await fetch(path, opt);
@@ -618,15 +655,15 @@ async function loadProducts(){
       <div class="price">${money(p.price)}</div>
     </div>`).join("") || "<p class='muted'>No products yet. Add some in Stock.</p>";
   $("stockBody").innerHTML = products.map(p=>`
-    <tr>
+    <tr class="clickable" onclick="openProduct(${p.id})">
       <td>${esc(p.name)}</td><td>${esc(p.barcode||"")}</td>
       <td>${money(p.price)}</td>
       <td class="stock ${stockClass(p.stock)}">${p.stock}</td>
-      <td>
+      <td onclick="event.stopPropagation()">
         <button class="ghost" onclick="adjust(${p.id},1)">+1</button>
         <button class="ghost" onclick="adjust(${p.id},-1)">-1</button>
         <button class="ghost" onclick="promptQty(${p.id})">+/- qty</button>
-        <button class="ghost" onclick="editProduct(${p.id})">Edit</button>
+        <button class="ghost" onclick="openProduct(${p.id})">Open</button>
         <button class="ghost" onclick="deleteProduct(${p.id})">Del</button>
       </td>
     </tr>`).join("");
@@ -699,19 +736,106 @@ function resetForm(){
   $("openStockWrap").hidden=false;
   $("cancelEdit").hidden=true;
 }
-function editProduct(id){
+function editProduct(id){ openProduct(id); }
+
+function openProduct(id){
   const p = products.find(x=>x.id===id);
   if(!p) return;
-  $("pId").value=id;
-  $("pName").value=p.name;
-  $("pCode").value=p.barcode||"";
-  $("pPrice").value=p.price;
-  $("pCost").value=p.cost;
-  $("formTitle").textContent="Edit product";
-  $("saveBtn").textContent="Save changes";
-  $("openStockWrap").hidden=true;
-  $("cancelEdit").hidden=false;
-  $("pName").focus();
+  $("dId").value=p.id;
+  $("dName").value=p.name;
+  $("dCode").value=p.barcode||"";
+  $("dPrice").value=p.price;
+  $("dCost").value=p.cost;
+  $("dStock").value=p.stock;
+  $("prodTitle").textContent=p.name;
+  $("labelName").textContent=p.name;
+  $("labelPrice").textContent=money(p.price);
+  drawBarcode($("labelBars"), labelValue(p));
+  $("labelCode").textContent=labelValue(p);
+  showTab("product");
+}
+function labelValue(p){
+  const c=(p.barcode||"").trim();
+  return c || ("P"+String(p.id).padStart(6,"0"));
+}
+async function saveDetail(){
+  const id=$("dId").value;
+  try{
+    await api("/api/products/"+id, {
+      method:"PUT", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        name:$("dName").value, barcode:$("dCode").value,
+        price:$("dPrice").value, cost:$("dCost").value
+      })
+    });
+    const cur=Number($("dStock").value);
+    const p=products.find(x=>x.id===Number(id));
+    if(p && Number.isFinite(cur) && cur!==Number(p.stock)){
+      await api("/api/products/"+id+"/adjust", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ qty: cur-Number(p.stock), reason:"adjust" })
+      });
+    }
+    toast("Saved");
+    await loadProducts();
+    openProduct(Number(id));
+  }catch(err){ toast(err.message); }
+}
+async function adjustFromDetail(n){
+  const id=Number($("dId").value);
+  await adjust(id,n);
+  const p=products.find(x=>x.id===id);
+  if(p) openProduct(id);
+}
+async function deleteFromDetail(){
+  const id=Number($("dId").value);
+  await deleteProduct(id);
+  showTab("stock");
+}
+
+const C39 = {"0":"nnnwwnwnn","1":"wnnwnnnnw","2":"nnwwnnnnw","3":"wnwwnnnnn","4":"nnnwwnnnw","5":"wnnwwnnnn","6":"nnwwwnnnn","7":"nnnwnnwnw","8":"wnnwnnwnn","9":"nnwwnnwnn","A":"wnnnnwnnw","B":"nnwnnwnnw","C":"wnwnnwnnn","D":"nnnnwwnnw","E":"wnnnwwnnn","F":"nnwnwwnnn","G":"nnnnnwwnw","H":"wnnnnwwnn","I":"nnwnnwwnn","J":"nnnnwwwnn","K":"wnnnnnnww","L":"nnwnnnnww","M":"wnwnnnnwn","N":"nnnnwnnww","O":"wnnnwnnwn","P":"nnwnwnnwn","Q":"nnnnnnwww","R":"wnnnnnwwn","S":"nnwnnnwwn","T":"nnnnwnwwn","U":"wwnnnnnnw","V":"nwwnnnnnw","W":"wwwnnnnnn","X":"nwnnwnnnw","Y":"wwnnwnnnn","Z":"nwwnwnnnn","-":"nwnnnnwnw",".":"wwnnnnwnn"," ":"nwwnnnwnn","*":"nwnnwnwnn","$":"nwnwnwnnn","/":"nwnwnnnwn","+":"nwnnnwnwn","%":"nnnwnwnwn"};
+function drawBarcode(svg, text){
+  let raw=String(text||"").toUpperCase().replace(/[^0-9A-Z.\-\/$+% ]/g,"");
+  if(!raw) raw="0";
+  const data="*"+raw+"*";
+  const w=280, h=80, unit=2;
+  svg.setAttribute("viewBox","0 0 "+w+" "+h);
+  svg.innerHTML="";
+  let x=4;
+  for(const ch of data){
+    const pat=C39[ch]; if(!pat) continue;
+    if(x>4) x+=unit;
+    let bar=true;
+    for(const b of pat){
+      const bw=unit*(b==="w"?3:1);
+      if(bar){
+        const r=document.createElementNS("http://www.w3.org/2000/svg","rect");
+        r.setAttribute("x",x); r.setAttribute("y",8);
+        r.setAttribute("width",bw); r.setAttribute("height",h-16);
+        r.setAttribute("fill","#111");
+        svg.appendChild(r);
+      }
+      x+=bw;
+      bar=!bar;
+    }
+  }
+}
+function printLabel(){
+  const id=Number($("dId").value);
+  const p=products.find(x=>x.id===id);
+  if(!p) return;
+  const w=window.open("","label","width=420,height=360");
+  if(!w){ toast("Allow pop-ups to print"); return; }
+  w.document.write(`<!DOCTYPE html><html><head><title>Label</title>
+    <style>body{font-family:sans-serif;text-align:center;padding:16px}svg{width:280px;height:80px}</style>
+    </head><body>
+    <div style="font-weight:700">${esc($("dName").value)}</div>
+    ${$("labelBars").outerHTML}
+    <div>${esc(labelValue({id:p.id,barcode:$("dCode").value}))}</div>
+    <div style="font-weight:700;margin-top:6px">${money($("dPrice").value)}</div>
+    <script>setTimeout(()=>{window.print();},200);<\/script>
+    </body></html>`);
+  w.document.close();
 }
 async function deleteProduct(id){
   const p = products.find(x=>x.id===id);

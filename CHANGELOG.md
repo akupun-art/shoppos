@@ -3,6 +3,15 @@
 All notable changes to ShopPOS are listed here.
 Newest version first.
 
+Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
+
+## 1.41 — 2026-09-10
+
+- Click a product in Stock to open its own page
+- Edit name, barcode, price, cost, stock on that page
+- Print a label with barcode bars + number + price
+- If no barcode number is set, label uses P000123 from the product id
+
 ## 1.4 — 2026-09-10
 
 - Settings shows this changelog (What changed)
