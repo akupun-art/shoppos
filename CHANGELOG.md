@@ -5,6 +5,11 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.53 — 2026-09-10
+
+- Sell: discount in RM or %
+- Receipt shows subtotal, discount, total
+
 ## 1.52 — 2026-09-10
 
 - Fix live Change on Sell: cart total variable no longer hides the translate function

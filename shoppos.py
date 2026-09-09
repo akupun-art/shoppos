@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.52"
+APP_VERSION = "1.53"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -140,6 +140,10 @@ def init_db() -> None:
         con.execute("ALTER TABLE sales ADD COLUMN voided_by INTEGER")
     if "voided_at" not in cols:
         con.execute("ALTER TABLE sales ADD COLUMN voided_at TEXT")
+    if "discount" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN discount REAL NOT NULL DEFAULT 0")
+    if "subtotal" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN subtotal REAL NOT NULL DEFAULT 0")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS day_closes (
@@ -635,16 +639,29 @@ class Handler(BaseHTTPRequestHandler):
                     line = round(p["price"] * qty, 2)
                     total += line
                     prepared.append((p, qty, line))
-                total = round(total, 2)
+                subtotal = round(total, 2)
+                try:
+                    discount = float(payload.get("discount") or 0)
+                except (TypeError, ValueError):
+                    discount = 0.0
+                if discount < 0:
+                    discount = 0.0
+                if discount > subtotal:
+                    discount = subtotal
+                discount = round(discount, 2)
+                total = round(subtotal - discount, 2)
                 if paid < total:
                     con.close()
                     self._json({"error": f"Paid is less than total ({total:.2f})"}, 400)
                     return
                 change = round(paid - total, 2)
+                note = payload.get("note") or ""
+                if discount:
+                    note = (note + " | discount " + f"{discount:.2f}").strip(" |")
                 cur = con.execute(
-                    """INSERT INTO sales (total, paid, change_amt, note, created_at, user_id)
-                       VALUES (?,?,?,?,?,?)""",
-                    (total, paid, change, payload.get("note") or "", now_iso(), user["id"]),
+                    """INSERT INTO sales (total, paid, change_amt, note, created_at, user_id, discount, subtotal)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (total, paid, change, note, now_iso(), user["id"], discount, subtotal),
                 )
                 sid = cur.lastrowid
                 for p, qty, line in prepared:
@@ -917,6 +934,11 @@ HTML = r"""<!DOCTYPE html>
     <h2 data-i18n="cart">Cart</h2>
     <div id="cart"></div>
     <div class="total" id="total">0.00</div>
+    <div class="row">
+      <div><label>Discount RM</label><input id="discRm" type="number" min="0" step="0.01" value="0" oninput="updateChange()"/></div>
+      <div><label>Discount %</label><input id="discPct" type="number" min="0" max="100" step="0.01" value="0" oninput="updateChange()"/></div>
+    </div>
+    <div class="muted" id="discLine"></div>
     <label data-i18n="cashReceived">Cash received</label>
     <input id="paid" type="number" min="0" step="0.01" placeholder="0.00"/>
     <div class="muted" id="change">Change: 0.00</div>
@@ -1329,8 +1351,8 @@ function renderCart(){
       <button class="ghost" onclick="chg(${i},1)">+</button>
       <div class="price">${money(l.price*l.qty)}</div>
     </div>`).join("") || `<p class='muted'>${t("tapAdd")}</p>`;
-  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
-  $("total").textContent = money(tot);
+  const tot = cartTotals();
+  $("total").textContent = money(tot.payable);
   updateChange();
 }
 function chg(i,d){
@@ -1338,11 +1360,30 @@ function chg(i,d){
   if(cart[i].qty<=0) cart.splice(i,1);
   renderCart();
 }
-function clearCart(){ cart=[]; renderCart(); }
+function clearCart(){
+  cart=[];
+  if($("discRm")) $("discRm").value="0";
+  if($("discPct")) $("discPct").value="0";
+  renderCart();
+}
+function cartTotals(){
+  const sub = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  let disc = Number(($("discRm")&&$("discRm").value)||0);
+  const pct = Number(($("discPct")&&$("discPct").value)||0);
+  if(!disc && pct) disc = sub * pct / 100;
+  if(disc<0) disc=0;
+  if(disc>sub) disc=sub;
+  disc=Math.round(disc*100)/100;
+  return { sub:Math.round(sub*100)/100, disc, payable:Math.round((sub-disc)*100)/100 };
+}
 function updateChange(){
-  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  const tot = cartTotals();
   const paid = Number($("paid").value||0);
-  $("change").textContent = t("change") + ": " + money(Math.max(0, paid-tot));
+  $("total").textContent = money(tot.payable);
+  if($("discLine")){
+    $("discLine").textContent = tot.disc ? ("Discount -"+money(tot.disc)+"  ·  was "+money(tot.sub)) : "";
+  }
+  $("change").textContent = t("change") + ": " + money(Math.max(0, paid-tot.payable));
   $("change").style.fontSize = "";
   $("change").style.fontWeight = "";
 }
@@ -1353,18 +1394,24 @@ $("search").addEventListener("keydown", (e)=>{
 });
 
 async function checkout(){
-  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  const tot = cartTotals();
   let paid = Number($("paid").value||0);
   if(!cart.length){ toast(t("emptyCart")); return; }
-  if(!paid) paid = tot;
+  if(!paid) paid = tot.payable;
   try{
     const sale = await api("/api/checkout", {
       method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({ items: cart.map(l=>({product_id:l.product_id, qty:l.qty})), paid })
+      body: JSON.stringify({
+        items: cart.map(l=>({product_id:l.product_id, qty:l.qty})),
+        paid, discount: tot.disc
+      })
     });
     toast("Sale #"+sale.id+" · change "+money(sale.change_amt));
     printReceipt(sale);
-    cart=[]; $("paid").value=""; renderCart(); loadProducts();
+    cart=[]; $("paid").value="";
+    if($("discRm")) $("discRm").value="0";
+    if($("discPct")) $("discPct").value="0";
+    renderCart(); loadProducts();
     $("change").textContent = t("change") + ": " + money(sale.change_amt);
     $("change").style.fontSize = "22px";
     $("change").style.fontWeight = "800";
@@ -1661,7 +1708,10 @@ function printReceipt(sale){
     <div>${esc(sale.created_at||"")}</div>
     <div>${esc(sale.cashier||"")}</div>
     <table>${items}</table>
-    <div class="tot">Total ${money(sale.total)}<br>Paid ${money(sale.paid)}<br>Change ${money(sale.change_amt)}</div>
+    <div class="tot">
+      ${sale.subtotal && sale.discount ? `Subtotal ${money(sale.subtotal)}<br>Discount -${money(sale.discount)}<br>`:""}
+      Total ${money(sale.total)}<br>Paid ${money(sale.paid)}<br>Change ${money(sale.change_amt)}
+    </div>
     <div style="text-align:center;margin-top:10px">Thank you</div>
     <div style="text-align:center;margin-top:8px;font-size:10px">Pendekar's App — Blogs can die.. idea lives on.</div>
     <script>setTimeout(()=>window.print(),250);<\/script>
