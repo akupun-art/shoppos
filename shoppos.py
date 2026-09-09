@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.5"
+APP_VERSION = "1.51"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -1343,6 +1343,8 @@ function updateChange(){
   const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
   const paid = Number($("paid").value||0);
   $("change").textContent = t("change") + ": " + money(Math.max(0, paid-t));
+  $("change").style.fontSize = "";
+  $("change").style.fontWeight = "";
 }
 $("paid").addEventListener("input", updateChange);
 $("search").addEventListener("input", ()=>loadProducts());
@@ -1363,6 +1365,9 @@ async function checkout(){
     toast("Sale #"+sale.id+" · change "+money(sale.change_amt));
     printReceipt(sale);
     cart=[]; $("paid").value=""; renderCart(); loadProducts();
+    $("change").textContent = t("change") + ": " + money(sale.change_amt);
+    $("change").style.fontSize = "22px";
+    $("change").style.fontWeight = "800";
     focusSearch();
   }catch(err){ toast(err.message); }
 }
