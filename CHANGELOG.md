@@ -5,6 +5,16 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.42 — 2026-09-10
+
+- Login with Staff ID + password
+- Roles: admin, manager, staff
+- Staff: Sell only
+- Manager: Sell + Stock + History
+- Admin: everything + Settings + People (create logins)
+- History shows which cashier made the sale
+- First login: ID `admin` / password `admin` — create a new admin and stop using this
+
 ## 1.41 — 2026-09-10
 
 - Click a product in Stock to open its own page

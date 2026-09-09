@@ -9,16 +9,19 @@ Open: http://127.0.0.1:8765
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 import threading
 import urllib.request
 from datetime import datetime, timezone
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.41"
+APP_VERSION = "1.42"
 ROOT = Path(__file__).resolve().parent
 DB_PATH = ROOT / "shoppos.db"
 CONFIG_PATH = ROOT / "shoppos-config.json"
@@ -37,6 +40,31 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+SESSIONS: dict[str, dict] = {}
+
+
+def hash_pw(password: str, salt: str | None = None) -> str:
+    salt = salt or secrets.token_hex(8)
+    digest = hashlib.sha256((salt + password).encode("utf-8")).hexdigest()
+    return f"{salt}${digest}"
+
+
+def check_pw(password: str, stored: str) -> bool:
+    if not stored or "$" not in stored:
+        return False
+    salt, _ = stored.split("$", 1)
+    return secrets.compare_digest(hash_pw(password, salt), stored)
+
+
+def public_user(row) -> dict:
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "name": row["name"],
+        "role": row["role"],
+    }
 
 
 def now_iso() -> str:
@@ -88,8 +116,25 @@ def init_db() -> None:
             note TEXT,
             created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            role TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
         """
     )
+    cols = [r[1] for r in con.execute("PRAGMA table_info(sales)").fetchall()]
+    if "user_id" not in cols:
+        con.execute("ALTER TABLE sales ADD COLUMN user_id INTEGER")
+    if con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
+        con.execute(
+            """INSERT INTO users (username, name, role, password_hash, created_at)
+               VALUES (?,?,?,?,?)""",
+            ("admin", "Owner", "admin", hash_pw("admin"), now_iso()),
+        )
     n = con.execute("SELECT COUNT(*) FROM products").fetchone()[0]
     if n == 0:
         samples = [
@@ -114,17 +159,25 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print(f"[{self.log_date_time_string()}] {fmt % args}")
 
-    def _send(self, code: int, body, content_type="application/json"):
+    def _send(self, code: int, body, content_type="application/json", extra_headers=None):
         data = body if isinstance(body, (bytes, bytearray)) else body.encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.end_headers()
         self.wfile.write(data)
 
-    def _json(self, obj, code=200):
-        self._send(code, json.dumps(obj, ensure_ascii=False), "application/json; charset=utf-8")
+    def _json(self, obj, code=200, extra_headers=None):
+        self._send(
+            code,
+            json.dumps(obj, ensure_ascii=False),
+            "application/json; charset=utf-8",
+            extra_headers=extra_headers,
+        )
 
     def _read_json(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -133,12 +186,60 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(raw.decode("utf-8"))
 
+    def _cookie_sid(self) -> str:
+        raw = self.headers.get("Cookie") or ""
+        c = SimpleCookie()
+        try:
+            c.load(raw)
+        except Exception:
+            return ""
+        if "shoppos_sid" in c:
+            return c["shoppos_sid"].value
+        return ""
+
+    def current_user(self):
+        sid = self._cookie_sid()
+        sess = SESSIONS.get(sid)
+        if not sess:
+            return None
+        con = connect()
+        row = con.execute("SELECT * FROM users WHERE id=?", (sess["user_id"],)).fetchone()
+        con.close()
+        return dict(row) if row else None
+
+    def require(self, *roles):
+        user = self.current_user()
+        if not user:
+            self._json({"error": "Please log in"}, 401)
+            return None
+        if roles and user["role"] not in roles:
+            self._json({"error": "No permission"}, 403)
+            return None
+        return user
+
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             self._send(200, HTML, "text/html; charset=utf-8")
             return
+        if path == "/api/me":
+            user = self.current_user()
+            if not user:
+                self._json({"user": None})
+                return
+            self._json({"user": public_user(user)})
+            return
+        if path == "/api/users":
+            if not self.require("admin"):
+                return
+            con = connect()
+            data = [public_user(r) for r in con.execute("SELECT * FROM users ORDER BY role, username")]
+            con.close()
+            self._json(data)
+            return
         if path == "/api/products":
+            if not self.require("admin", "manager", "staff"):
+                return
             q = parse_qs(urlparse(self.path).query).get("q", [""])[0].strip()
             con = connect()
             if q:
@@ -156,8 +257,16 @@ class Handler(BaseHTTPRequestHandler):
             self._json(data)
             return
         if path == "/api/sales":
+            if not self.require("admin", "manager", "staff"):
+                return
             con = connect()
-            sales = rows(con.execute("SELECT * FROM sales ORDER BY id DESC LIMIT 100"))
+            sales = rows(
+                con.execute(
+                    """SELECT s.*, u.username AS cashier
+                       FROM sales s LEFT JOIN users u ON u.id = s.user_id
+                       ORDER BY s.id DESC LIMIT 100"""
+                )
+            )
             for s in sales:
                 s["items"] = rows(
                     con.execute("SELECT * FROM sale_items WHERE sale_id=?", (s["id"],))
@@ -166,6 +275,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(sales)
             return
         if path == "/api/meta":
+            if not self.require("admin", "manager", "staff"):
+                return
             cfg = load_config()
             self._json(
                 {
@@ -175,6 +286,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/api/changelog":
+            if not self.require("admin", "manager"):
+                return
             cfg = load_config()
             url = (cfg.get("update_url") or "").strip()
             text = ""
@@ -197,6 +310,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"text": text})
             return
         if path == "/api/summary":
+            if not self.require("admin", "manager", "staff"):
+                return
             con = connect()
             today = datetime.now().strftime("%Y-%m-%d")
             sold = con.execute(
@@ -225,7 +340,60 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "invalid json"}, 400)
             return
 
+        if path == "/api/login":
+            username = (payload.get("username") or "").strip()
+            password = payload.get("password") or ""
+            con = connect()
+            row = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+            con.close()
+            if not row or not check_pw(password, row["password_hash"]):
+                self._json({"error": "Wrong ID or password"}, 401)
+                return
+            sid = secrets.token_hex(16)
+            SESSIONS[sid] = {"user_id": row["id"]}
+            cookie = f"shoppos_sid={sid}; Path=/; HttpOnly; SameSite=Lax"
+            self._json({"user": public_user(row)}, extra_headers={"Set-Cookie": cookie})
+            return
+
+        if path == "/api/logout":
+            sid = self._cookie_sid()
+            SESSIONS.pop(sid, None)
+            self._json({"ok": True}, extra_headers={"Set-Cookie": "shoppos_sid=; Path=/; Max-Age=0"})
+            return
+
+        if path == "/api/users":
+            if not self.require("admin"):
+                return
+            username = (payload.get("username") or "").strip()
+            name = (payload.get("name") or username).strip()
+            role = (payload.get("role") or "staff").strip()
+            password = payload.get("password") or ""
+            if not username or not password:
+                self._json({"error": "ID and password required"}, 400)
+                return
+            if role not in ("admin", "manager", "staff"):
+                self._json({"error": "Role must be admin, manager or staff"}, 400)
+                return
+            con = connect()
+            try:
+                con.execute(
+                    """INSERT INTO users (username, name, role, password_hash, created_at)
+                       VALUES (?,?,?,?,?)""",
+                    (username, name, role, hash_pw(password), now_iso()),
+                )
+                con.commit()
+            except sqlite3.IntegrityError:
+                con.close()
+                self._json({"error": "That ID is already used"}, 400)
+                return
+            row = con.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+            con.close()
+            self._json(public_user(row), 201)
+            return
+
         if path == "/api/config":
+            if not self.require("admin"):
+                return
             url = (payload.get("update_url") or "").strip()
             cfg = load_config()
             cfg["update_url"] = url
@@ -234,6 +402,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/update":
+            if not self.require("admin"):
+                return
             cfg = load_config()
             url = (payload.get("update_url") or cfg.get("update_url") or "").strip()
             if not url:
@@ -258,6 +428,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/products":
+            if not self.require("admin", "manager"):
+                return
             name = (payload.get("name") or "").strip()
             if not name:
                 self._json({"error": "Name is required"}, 400)
@@ -294,6 +466,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/products/") and path.endswith("/adjust"):
+            if not self.require("admin", "manager"):
+                return
             pid = int(path.split("/")[3])
             try:
                 qty = float(payload.get("qty") or 0)
@@ -326,6 +500,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/checkout":
+            user = self.require("admin", "manager", "staff")
+            if not user:
+                return
             items = payload.get("items") or []
             if not items:
                 self._json({"error": "Cart is empty"}, 400)
@@ -361,9 +538,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 change = round(paid - total, 2)
                 cur = con.execute(
-                    """INSERT INTO sales (total, paid, change_amt, note, created_at)
-                       VALUES (?,?,?,?,?)""",
-                    (total, paid, change, payload.get("note") or "", now_iso()),
+                    """INSERT INTO sales (total, paid, change_amt, note, created_at, user_id)
+                       VALUES (?,?,?,?,?,?)""",
+                    (total, paid, change, payload.get("note") or "", now_iso(), user["id"]),
                 )
                 sid = cur.lastrowid
                 for p, qty, line in prepared:
@@ -400,6 +577,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "invalid json"}, 400)
             return
         if path.startswith("/api/products/"):
+            if not self.require("admin", "manager"):
+                return
             pid = int(path.split("/")[3])
             name = (payload.get("name") or "").strip()
             if not name:
@@ -437,6 +616,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         path = urlparse(self.path).path
         if path.startswith("/api/products/"):
+            if not self.require("admin", "manager"):
+                return
             pid = int(path.split("/")[3])
             con = connect()
             con.execute("UPDATE sale_items SET product_id=NULL WHERE product_id=?", (pid,))
@@ -499,6 +680,8 @@ HTML = r"""<!DOCTYPE html>
   tr.clickable:hover { background:#f3f4f6; }
   .label-box { border:1px dashed var(--line); border-radius:12px; padding:16px; text-align:center; background:#fff; }
   .toast { position:fixed; bottom:16px; right:16px; background:#111827; color:#fff; padding:10px 14px; border-radius:10px; display:none; }
+  #login { position:fixed; inset:0; background:#111827; display:flex; align-items:center; justify-content:center; z-index:20; }
+  #login .card { width:min(380px,92vw); }
   label { font-size:12px; color:var(--muted); display:block; margin:8px 0 4px; }
 </style>
 </head>
@@ -510,9 +693,25 @@ HTML = r"""<!DOCTYPE html>
     <button data-tab="stock">Stock</button>
     <button data-tab="history">History</button>
     <button data-tab="settings">Settings</button>
+    <button data-tab="people">People</button>
   </nav>
   <div class="stats" id="stats">Today: —</div>
+  <div class="muted" id="who" style="color:#d1d5db;font-size:13px"></div>
+  <button class="ghost" id="logoutBtn" onclick="doLogout()" style="display:none;background:#1f2937;color:#fff;border:0">Log out</button>
 </header>
+<div id="login">
+  <div class="card">
+    <h2>ShopPOS login</h2>
+    <label>Staff ID</label>
+    <input id="loginId" placeholder="e.g. admin or ali01"/>
+    <label>Password</label>
+    <input id="loginPw" type="password"/>
+    <div class="pay" style="margin-top:12px">
+      <button class="primary" onclick="doLogin()">Log in</button>
+    </div>
+    <p class="muted" id="loginErr"></p>
+  </div>
+</div>
 <main>
 <section id="sell" class="grid">
   <div class="card">
@@ -608,12 +807,35 @@ HTML = r"""<!DOCTYPE html>
   <h2 style="margin-top:22px">What changed</h2>
   <pre id="changelog" class="muted" style="white-space:pre-wrap;font:13px/1.45 system-ui,sans-serif">Loading changelog…</pre>
 </section>
+
+<section id="people" class="card" hidden>
+  <h2>Staff accounts</h2>
+  <p class="muted">Each person gets their own ID. Staff can only use Sell. Manager can sell and stock. Admin can do everything.</p>
+  <div class="row">
+    <div><label>Staff ID</label><input id="uId" placeholder="ali01"/></div>
+    <div><label>Name</label><input id="uName" placeholder="Ali"/></div>
+  </div>
+  <div class="row">
+    <div><label>Role</label>
+      <select id="uRole" style="width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px">
+        <option value="staff">staff</option>
+        <option value="manager">manager</option>
+        <option value="admin">admin</option>
+      </select>
+    </div>
+    <div><label>Password</label><input id="uPw" type="password"/></div>
+  </div>
+  <button class="primary" onclick="addUser()">Create login</button>
+  <table style="margin-top:16px"><thead><tr><th>ID</th><th>Name</th><th>Role</th></tr></thead>
+  <tbody id="userBody"></tbody></table>
+</section>
 </main>
 <div class="toast" id="toast"></div>
 <script>
 const $ = (id) => document.getElementById(id);
 let products = [];
 let cart = [];
+let currentUser = null;
 
 function toast(msg){
   const t = $("toast"); t.textContent = msg; t.style.display="block";
@@ -627,17 +849,92 @@ document.querySelectorAll("nav button").forEach(b=>{
 });
 function showTab(name){
   document.querySelectorAll("nav button").forEach(x=>x.classList.toggle("active", x.dataset.tab===name));
-  ["sell","stock","history","settings","product"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
+  ["sell","stock","history","settings","product","people"].forEach(id=>{ if($(id)) $(id).hidden = id!==name; });
   if(name==="history") loadSales();
   if(name==="stock") loadProducts();
   if(name==="settings") loadMeta();
+  if(name==="people") loadUsers();
 }
 
 async function api(path, opt){
+  opt = opt || {};
+  opt.credentials = "same-origin";
   const r = await fetch(path, opt);
   const data = await r.json();
+  if(r.status===401){ showLogin(); throw new Error(data.error || "Please log in"); }
   if(!r.ok) throw new Error(data.error || "Request failed");
   return data;
+}
+function showLogin(){
+  currentUser=null;
+  $("login").style.display="flex";
+  $("logoutBtn").style.display="none";
+}
+function applyRole(){
+  const role = currentUser && currentUser.role;
+  const allow = {
+    sell: true,
+    stock: role==="admin" || role==="manager",
+    history: true,
+    settings: role==="admin",
+    people: role==="admin",
+    product: role==="admin" || role==="manager"
+  };
+  document.querySelectorAll("nav button").forEach(b=>{
+    b.style.display = allow[b.dataset.tab] ? "" : "none";
+  });
+  $("who").textContent = currentUser ? (currentUser.name+" · "+currentUser.username+" · "+currentUser.role) : "";
+  $("logoutBtn").style.display = currentUser ? "" : "none";
+}
+async function boot(){
+  try{
+    const me = await fetch("/api/me", {credentials:"same-origin"}).then(r=>r.json());
+    if(me.user){
+      currentUser=me.user;
+      $("login").style.display="none";
+      applyRole();
+      loadProducts();
+      return;
+    }
+  }catch(e){}
+  showLogin();
+}
+async function doLogin(){
+  $("loginErr").textContent="";
+  try{
+    const r = await api("/api/login", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ username:$("loginId").value, password:$("loginPw").value })
+    });
+    currentUser=r.user;
+    $("login").style.display="none";
+    $("loginPw").value="";
+    applyRole();
+    showTab("sell");
+    loadProducts();
+  }catch(err){ $("loginErr").textContent=err.message; }
+}
+async function doLogout(){
+  try{ await api("/api/logout", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"}); }catch(e){}
+  showLogin();
+}
+async function loadUsers(){
+  const users = await api("/api/users");
+  $("userBody").innerHTML = users.map(u=>`<tr><td>${esc(u.username)}</td><td>${esc(u.name)}</td><td>${esc(u.role)}</td></tr>`).join("");
+}
+async function addUser(){
+  try{
+    await api("/api/users", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({
+        username:$("uId").value, name:$("uName").value,
+        role:$("uRole").value, password:$("uPw").value
+      })
+    });
+    $("uId").value=$("uName").value=$("uPw").value="";
+    toast("Account created");
+    loadUsers();
+  }catch(err){ toast(err.message); }
 }
 
 async function loadSummary(){
@@ -895,7 +1192,7 @@ async function loadSales(){
   $("sales").innerHTML = sales.map(s=>`
     <div class="item" style="cursor:default">
       <div><b>#${s.id} · ${money(s.total)}</b>
-        <div class="muted">${esc(s.created_at)} · ${s.items.map(i=>i.qty+"× "+i.name).join(", ")}</div>
+        <div class="muted">${esc(s.created_at)} · ${esc(s.cashier||"-")} · ${s.items.map(i=>i.qty+"× "+i.name).join(", ")}</div>
       </div>
     </div>`).join("") || "<p class='muted'>No sales yet.</p>";
 }
@@ -931,8 +1228,7 @@ async function doUpdate(){
   }catch(err){ toast(err.message); }
 }
 
-loadProducts();
-loadMeta();
+boot();
 </script>
 </body>
 </html>
