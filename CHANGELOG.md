@@ -5,6 +5,10 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.52 — 2026-09-10
+
+- Fix live Change on Sell: cart total variable no longer hides the translate function
+
 ## 1.51 — 2026-09-10
 
 - After Charge, change stays on the Sell screen (not only on the receipt)

@@ -21,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.51"
+APP_VERSION = "1.52"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -1329,8 +1329,8 @@ function renderCart(){
       <button class="ghost" onclick="chg(${i},1)">+</button>
       <div class="price">${money(l.price*l.qty)}</div>
     </div>`).join("") || `<p class='muted'>${t("tapAdd")}</p>`;
-  const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
-  $("total").textContent = money(t);
+  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  $("total").textContent = money(tot);
   updateChange();
 }
 function chg(i,d){
@@ -1340,9 +1340,9 @@ function chg(i,d){
 }
 function clearCart(){ cart=[]; renderCart(); }
 function updateChange(){
-  const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
   const paid = Number($("paid").value||0);
-  $("change").textContent = t("change") + ": " + money(Math.max(0, paid-t));
+  $("change").textContent = t("change") + ": " + money(Math.max(0, paid-tot));
   $("change").style.fontSize = "";
   $("change").style.fontWeight = "";
 }
@@ -1353,10 +1353,10 @@ $("search").addEventListener("keydown", (e)=>{
 });
 
 async function checkout(){
-  const t = cart.reduce((s,l)=>s+l.price*l.qty,0);
+  const tot = cart.reduce((s,l)=>s+l.price*l.qty,0);
   let paid = Number($("paid").value||0);
   if(!cart.length){ toast(t("emptyCart")); return; }
-  if(!paid) paid = t;
+  if(!paid) paid = tot;
   try{
     const sale = await api("/api/checkout", {
       method:"POST", headers:{"Content-Type":"application/json"},
