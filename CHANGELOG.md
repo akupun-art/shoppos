@@ -5,6 +5,10 @@ Newest version first.
 
 Versions go 1.4 → 1.41 → 1.42 … 1.49 → 1.5
 
+## 1.55 — 2026-09-10
+
+- Check and update restarts ShopPOS by itself (no need to close Python)
+
 ## 1.54 — 2026-09-10
 
 - Discount box on Sell is highlighted so it is hard to miss

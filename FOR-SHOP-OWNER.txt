@@ -1,0 +1,23 @@
+SHOPPOS — for the person at the counter (no GitHub needed)
+
+1. Install Python from https://www.python.org/downloads/
+   Tick "Add python.exe to PATH". Restart the PC.
+
+2. Keep this whole folder together (shoppos.py and this file).
+
+3. Double-click start-shoppos.bat
+   A black window opens. Leave it open.
+   The browser opens the till.
+
+4. First login: admin / admin
+   Then change the password (Password tab).
+
+5. New version: admin → Settings → Check and update.
+   Wait a few seconds. The till restarts itself. If the page is blank, press F5.
+
+You do not need a GitHub account. The Update button already knows
+where to download from.
+
+Backup: Settings → Download backup → copy the file to a USB stick.
+
+Pendekar's App — Blogs can die.. idea lives on.

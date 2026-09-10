@@ -11,9 +11,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
+import subprocess
+import sys
 import threading
+import time
 import urllib.request
 from datetime import datetime, timezone
 from http.cookies import SimpleCookie
@@ -21,7 +25,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
-APP_VERSION = "1.54"
+APP_VERSION = "1.55"
 DEDICATION = "Pendekar's App — Blogs can die.. idea lives on."
 DEFAULT_UPDATE_URL = "https://raw.githubusercontent.com/akupun-art/shoppos/main/shoppos.py"
 ROOT = Path(__file__).resolve().parent
@@ -45,6 +49,22 @@ def load_config() -> dict:
 
 def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+
+
+def restart_after_update() -> None:
+    def _go():
+        time.sleep(1.5)
+        try:
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve())],
+                cwd=str(ROOT),
+                close_fds=True,
+            )
+        except Exception:
+            pass
+        os._exit(0)
+
+    threading.Thread(target=_go, daemon=True).start()
 
 
 SESSIONS: dict[str, dict] = {}
@@ -532,7 +552,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             target = Path(__file__).resolve()
             target.write_bytes(data)
-            self._json({"ok": True, "message": "Updated. Close the Python window and run py shoppos.py again."})
+            restart_after_update()
+            self._json({"ok": True, "restart": True, "message": "Updated. ShopPOS is restarting… wait a few seconds."})
             return
 
         if path == "/api/products":
@@ -1036,7 +1057,7 @@ HTML = r"""<!DOCTYPE html>
     <button class="ghost" onclick="saveUpdateUrl()">Save URL</button>
     <button class="primary" onclick="doUpdate()">Check and update</button>
   </div>
-  <p class="muted" style="margin-top:12px">After a successful update, close the black Python window and start shoppos.py again. Your shoppos.db is not replaced.</p>
+  <p class="muted" style="margin-top:12px">Check and update downloads the new program and restarts by itself. Wait a few seconds. shoppos.db is not replaced.</p>
   <h2 style="margin-top:22px">Receipt</h2>
   <label>Shop name on receipt</label>
   <input id="shopName" placeholder="My Shop"/>
@@ -1635,6 +1656,18 @@ async function doUpdate(){
       body: JSON.stringify({ update_url: $("updateUrl").value })
     });
     toast(r.message || "Updated");
+    if(r.restart){
+      toast("Restarting… page will reload");
+      let n=0;
+      const tick=setInterval(async()=>{
+        n++;
+        try{
+          const m=await fetch("/api/meta",{credentials:"same-origin"}).then(x=>x.json());
+          if(m && m.version){ clearInterval(tick); location.reload(); }
+        }catch(e){}
+        if(n>20){ clearInterval(tick); location.reload(); }
+      },1000);
+    }
   }catch(err){ toast(err.message); }
 }
 
